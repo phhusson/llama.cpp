@@ -601,6 +601,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_MOE_SLOT_RESOLVE,
+
         GGML_OP_COUNT,
     };
 
@@ -2459,6 +2461,16 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   k);
+
+    GGML_API struct ggml_tensor * ggml_moe_slot_resolve(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * ids,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * ref,
+            int                   n_expert,
+            int                   n_slots,
+            int                   layer,
+            int                   mode);
 
     // top k elements per row
     // note: the resulting top k indices are in no particular order
