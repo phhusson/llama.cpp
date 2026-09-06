@@ -10,6 +10,7 @@
 enum common_reasoning_budget_state {
     REASONING_BUDGET_IDLE,         // waiting for start sequence
     REASONING_BUDGET_COUNTING,     // counting down tokens
+    REASONING_BUDGET_WARNING,      // injecting a mid-thinking warning, then back to COUNTING
     REASONING_BUDGET_FORCING,      // forcing budget message + end sequence
     REASONING_BUDGET_WAITING_UTF8, // budget exhausted, waiting for UTF-8 completion
     REASONING_BUDGET_DONE,         // passthrough forever
@@ -33,6 +34,27 @@ enum common_reasoning_budget_state {
 //   budget         - max tokens allowed in the reasoning block
 //   initial_state  - initial state
 //
+// Creates a reasoning budget sampler with a mid-thinking warning: when the
+// remaining budget drops to warning_threshold, the warning text is injected
+// into the reasoning stream once and counting continues. warning_threshold
+// <= 0 or an empty message disables the warning (exact same behavior as
+// common_reasoning_budget_init).
+//
+//   vocab             - vocabulary (used for UTF-8 boundary detection and for
+//                       tokenizing the warning message; can be nullptr only
+//                       when the warning is disabled)
+//   warning_threshold - inject the warning when remaining <= this (<= 0 = off)
+//   warning_message   - text injected into the reasoning stream
+struct llama_sampler * common_reasoning_budget_init_warning(
+        const struct llama_vocab        * vocab,
+        const std::vector<llama_tokens> & start_seqs,
+        const std::vector<llama_tokens> & end_seqs,
+        const llama_tokens              & forced_tokens,
+        int32_t                           budget,
+        int32_t                           warning_threshold,
+        const std::string              & warning_message,
+        common_reasoning_budget_state     initial_state = REASONING_BUDGET_IDLE);
+
 struct llama_sampler * common_reasoning_budget_init(
         const struct llama_vocab        * vocab,
         const std::vector<llama_tokens> & start_seqs,

@@ -3829,6 +3829,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET_MESSAGE"));
     add_opt(common_arg(
+        {"--reasoning-budget-warning"}, "N",
+        "inject a warning into the reasoning stream when the thinking budget drops to N remaining tokens (default: off)",
+        [](common_params & params, int value) {
+            params.sampling.reasoning_budget_warning = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THINK_BUDGET_WARNING"));
+    add_opt(common_arg(
+        {"--reasoning-budget-warning-message"}, "MESSAGE",
+        "text of the mid-thinking warning (default: 'WARNING: thinking budget nearly exhausted')",
+        [](common_params & params, const std::string & value) {
+            params.sampling.reasoning_budget_warning_message = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THINK_BUDGET_WARNING_MESSAGE"));
+    add_opt(common_arg(
         {"--reasoning-preserve"},
         {"--no-reasoning-preserve"},
         "preserve reasoning trace in the full history, not just the last assistant message (default: enabled)\n"
