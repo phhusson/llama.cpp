@@ -1765,6 +1765,12 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
 
+    cparams.expert_expand             = params.expert_expand;
+    cparams.expert_expand_layer_begin = params.expert_expand_layer_begin;
+    cparams.expert_expand_layer_end   = params.expert_expand_layer_end;
+    cparams.expert_expand_threshold   = params.expert_expand_threshold;
+    cparams.expert_expand_decay_end   = params.expert_expand_decay_end;
+
     return cparams;
 }
 

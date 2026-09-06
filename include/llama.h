@@ -416,6 +416,17 @@ extern "C" {
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
 
+        // layer-scoped expert-budget expansion (training-free, inference-only; Zenodo 22255483):
+        // widen the MoE admission budget to expert_expand experts (>= native top-K) within
+        // [expert_expand_layer_begin, expert_expand_layer_end] using a relative probability
+        // threshold expert_expand_threshold and a linear decay ending at expert_expand_decay_end on
+        // the additionally admitted experts. expert_expand = 0 disables.
+        uint32_t expert_expand;
+        int32_t  expert_expand_layer_begin;
+        int32_t  expert_expand_layer_end;
+        float    expert_expand_threshold;
+        float    expert_expand_decay_end;
+
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
         // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)

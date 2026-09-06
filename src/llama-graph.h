@@ -771,6 +771,16 @@ class llm_graph_result;
 
 struct llama_moe_stream;
 
+// op userdata for layer-scoped expert-budget expansion (Zenodo 22255483). Holds the model's
+// expert geometry plus the runtime expansion config; allocated once per llama_context.
+struct llm_expand_ctx {
+    int32_t n_expert = 0;
+    int32_t K        = 0;
+    int32_t N        = 0;
+    float   T        = 0.80f;
+    float   D        = 0.50f;
+};
+
 struct llm_graph_params {
     llm_arch arch = LLM_ARCH_UNKNOWN;
 
@@ -791,6 +801,9 @@ struct llm_graph_params {
 
     // MoE expert SSD streaming state of the model, null when not enabled
     llama_moe_stream * mstream = nullptr;
+
+    // expert-budget expansion op userdata (persistent, owned by the llama_context), null when off
+    const llm_expand_ctx * expand_ctx = nullptr;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 
@@ -1006,6 +1019,14 @@ struct llm_graph_context {
     const int64_t n_embd_v_gqa;
     const int64_t n_expert;
     const int64_t n_expert_used;
+
+    // layer-scoped expert-budget expansion (Zenodo 22255483); N = 0 disables
+    const uint32_t expert_expand;
+    const int32_t  expert_expand_layer_begin;
+    const int32_t  expert_expand_layer_end;
+    const float    expert_expand_threshold;
+    const float    expert_expand_decay_end;
+    const llm_expand_ctx * expand_ctx;
 
     const float freq_base;
     const float freq_scale;

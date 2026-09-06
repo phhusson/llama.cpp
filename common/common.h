@@ -454,6 +454,16 @@ struct ggml_opt_optimizer_params common_opt_lr_pars(void * userdata);
 
 struct common_params {
     int32_t n_predict             =    -1; // max. number of new tokens to predict, -1 == no limit
+
+    // layer-scoped expert-budget expansion (Zenodo 22255483): widen the MoE admission budget to
+    // expert_expand (>= native top-K) within [expert_expand_layer_begin, expert_expand_layer_end],
+    // with threshold expert_expand_threshold and linear decay ending at expert_expand_decay_end
+    // on the additional experts. expert_expand = 0 disables.
+    uint32_t expert_expand             = 0;
+    int32_t  expert_expand_layer_begin = -1;
+    int32_t  expert_expand_layer_end   = -1;
+    float    expert_expand_threshold   = 0.80f;
+    float    expert_expand_decay_end   = 0.50f;
     int32_t n_ctx                 =     0; // context size, 0 == context the model was trained with
     int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
     int32_t n_ubatch              =   512; // physical batch size for prompt processing (must be >=32 to use BLAS)

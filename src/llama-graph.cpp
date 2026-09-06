@@ -1449,6 +1449,112 @@ void llm_graph_result::set_params(const llm_graph_params & params) {
     this->params = params;
 }
 
+// Layer-scoped expert-budget expansion (Zenodo 22255483): a training-free, inference-only routing
+// modification. Per token: sort router probs descending (ties: lower id), reference rank R = N/2
+// with pref = p[R]; keep the top N/4 ranks unconditionally and admit rank k > N/4 only while
+// p[k] >= T x pref, capped at N. Ranks K+1..c are scaled by a linear factor (0.99 at rank K+1 down
+// to D at rank N; (0.99+D)/2 when N == K+1), then the admitted weights are renormalized. Outputs
+// are padded to N rows with the last admitted id and zero weight: graph shapes stay static and a
+// streamed remap dedups the padded id without issuing a read.
+static void llm_expand_run(const llm_expand_ctx & c, const float * pr, int32_t * ids, float * out_w) {
+    std::vector<int32_t> order(c.n_expert);
+    for (int32_t i = 0; i < c.n_expert; i++) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](int32_t x, int32_t y) {
+        const float px = pr[x], py = pr[y];
+        if (px != py) return px > py;
+        return x < y;
+    });
+
+    const float pref = pr[order[c.N/2]];
+    const int32_t floor_k = std::max<int32_t>(1, c.N/4);
+    int32_t cnt = floor_k;
+    if (c.T > 0.0f) {
+        while (cnt < c.N && pr[order[cnt]] >= c.T*pref) {
+            cnt++;
+        }
+    } else {
+        cnt = c.N;
+    }
+
+    std::vector<float> w(c.N);
+    float sum = 0.0f;
+    for (int32_t k = 0; k < cnt; k++) {
+        float wk = pr[order[k]];
+        if (k >= c.K) {
+            const int32_t j = k + 1; // one-based rank
+            float factor;
+            if (c.N > c.K + 1) {
+                factor = 0.99f - (0.99f - c.D)*(float)(j - (c.K + 1))/(float)(c.N - (c.K + 1));
+            } else {
+                factor = (0.99f + c.D)/2.0f;
+            }
+            wk *= factor;
+        }
+        w[k] = wk;
+        sum += wk;
+    }
+    if (sum > 0.0f) {
+        const float inv = 1.0f/sum;
+        for (int32_t k = 0; k < cnt; k++) {
+            w[k] *= inv;
+        }
+    }
+    for (int32_t k = 0; k < cnt; k++) {
+        ids[k]    = order[k];
+        out_w[k]  = w[k];
+    }
+    for (int32_t k = cnt; k < c.N; k++) {
+        ids[k]   = order[cnt - 1]; // duplicate of the last admitted expert: no extra read
+        out_w[k] = 0.0f;
+    }
+}
+
+// dst/a: [N, n_tokens] shape carrier; b: router probs f32 [n_expert, n_tokens]
+static void llm_expand_ids(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, int ith, int nth, void * userdata) {
+    GGML_UNUSED(nth);
+    GGML_UNUSED(a);
+    if (ith != 0) {
+        return;
+    }
+    GGML_ASSERT(b->type == GGML_TYPE_F32 && ggml_is_contiguous(b));
+    const auto & c = *(const llm_expand_ctx *) userdata;
+    GGML_ASSERT(b->ne[0] == c.n_expert && b->ne[1] == dst->ne[1]);
+    GGML_ASSERT(dst->type == GGML_TYPE_I32 && dst->ne[0] == c.N);
+
+    std::vector<int32_t> ids(c.N);
+    std::vector<float>   w(c.N);
+    const float * pr = (const float *) b->data;
+    int32_t * out = (int32_t *) dst->data;
+    for (int64_t t = 0; t < b->ne[1]; t++) {
+        llm_expand_run(c, pr + t*c.n_expert, ids.data(), w.data());
+        memcpy(out + t*c.N, ids.data(), c.N*sizeof(int32_t));
+    }
+}
+
+// dst/a: [1, N, n_tokens] shape carrier; b: router probs f32 [n_expert, n_tokens]
+static void llm_expand_weights(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, int ith, int nth, void * userdata) {
+    GGML_UNUSED(nth);
+    GGML_UNUSED(a);
+    if (ith != 0) {
+        return;
+    }
+    GGML_ASSERT(b->type == GGML_TYPE_F32 && ggml_is_contiguous(b));
+    const auto & c = *(const llm_expand_ctx *) userdata;
+    GGML_ASSERT(b->ne[0] == c.n_expert && b->ne[1] == dst->ne[2]);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 && dst->ne[1] == c.N);
+
+    std::vector<int32_t> ids(c.N);
+    std::vector<float>   w(c.N);
+    const float * pr = (const float *) b->data;
+    float * out = (float *) dst->data;
+    for (int64_t t = 0; t < b->ne[1]; t++) {
+        llm_expand_run(c, pr + t*c.n_expert, ids.data(), w.data());
+        memcpy(out + t*c.N, w.data(), c.N*sizeof(float));
+    }
+}
+
 //
 // llm_graph_context
 //
@@ -1471,6 +1577,12 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     n_embd_v_gqa     (hparams.n_embd_v_gqa()),
     n_expert         (hparams.n_expert),
     n_expert_used    (cparams.warmup ? hparams.n_expert : hparams.n_expert_used()),
+    expert_expand          (cparams.expert_expand),
+    expert_expand_layer_begin (cparams.expert_expand_layer_begin),
+    expert_expand_layer_end   (cparams.expert_expand_layer_end),
+    expert_expand_threshold   (cparams.expert_expand_threshold),
+    expert_expand_decay_end   (cparams.expert_expand_decay_end),
+    expand_ctx         (params.expand_ctx),
     freq_base        (cparams.rope_freq_base),
     freq_scale       (cparams.rope_freq_scale),
     ext_factor       (cparams.yarn_ext_factor),
@@ -2066,6 +2178,25 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
     cb(probs, "ffn_moe_probs", il);
 
+    // layer-scoped expert-budget expansion (Zenodo 22255483): admit up to N experts in the
+    // configured late layer range, using a relative probability threshold and a linear decay on the
+    // additional experts (computed by the llm_expand_* ops). At zero budget or outside the range
+    // this is the exact native top-K path.
+    // Expansion is confined to the single-wave (decode) path: the multi-wave prefill planner's
+    // parking-pool invariant is sized for the native expert count, and the paper's measured benefit
+    // (shorter reasoning trajectories) is in generated tokens anyway. Prefill keeps exact routing.
+    const llama_moe_stream_layer * msl_cap = mstream != nullptr ? mstream->layer(il) : nullptr;
+    const uint64_t cap_est = msl_cap != nullptr && msl_cap->n_slots > (uint32_t) n_expert_used
+            ? (msl_cap->n_slots - (uint32_t) n_expert_used)/2 : UINT64_MAX;
+    const bool native_single_wave = msl_cap == nullptr ||
+            (uint64_t) n_tokens*n_expert_used <= cap_est;
+    const bool expand_layer = expand_ctx != nullptr && expert_expand >= (uint32_t) n_expert_used &&
+            n_expert_used > 0 && il >= expert_expand_layer_begin && il <= expert_expand_layer_end &&
+            selected_experts_in == nullptr && gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX &&
+            native_single_wave;
+    const int64_t expert_rows = expand_layer ? (int64_t) expert_expand : n_expert_used;
+    ggml_tensor * probs_flat = ggml_reshape_2d(ctx0, probs, n_expert, n_tokens); // canonical [n_expert, n_tokens]
+
     // add experts selection bias - introduced in DeepSeek V3
     // leave probs unbiased as it's later used to get expert weights
     ggml_tensor * selection_probs = probs;
@@ -2113,8 +2244,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     // select experts
     ggml_tensor * selected_experts = selected_experts_in;
     if (selected_experts == nullptr) {
-        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
-        cb(selected_experts->src[0], "ffn_moe_argsort", il);
+        if (expand_layer) {
+            // shape carrier 'a' fixes the [N, n_tokens] output; the op reads the probs from 'b'
+            ggml_tensor * ids_carrier = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, expert_rows, n_tokens);
+            selected_experts = ggml_map_custom2(ctx0, ids_carrier, probs_flat, llm_expand_ids, 1, (void *) expand_ctx);
+            cb(selected_experts, "ffn_moe_expand_ids", il);
+        } else {
+            selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+            cb(selected_experts->src[0], "ffn_moe_argsort", il);
+        }
     }
     cb(selected_experts, "ffn_moe_topk", il);
 
@@ -2127,18 +2265,26 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
     }
 
-    ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+    ggml_tensor * weights = nullptr;
+    if (expand_layer) {
+        // decayed + renormalized admitted probs, padded to N rows (zero weight)
+        ggml_tensor * w_carrier = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, expert_rows, n_tokens);
+        weights = ggml_map_custom2(ctx0, w_carrier, probs_flat, llm_expand_weights, 1, (void *) expand_ctx);
+        cb(weights, "ffn_moe_expand_weights", il);
+    } else {
+        weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+    }
     cb(weights, "ffn_moe_weights", il);
 
 
-    if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
+    if (!expand_layer && gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
         weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
         weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
         cb(weights, "ffn_moe_weights_softmax", il);
     }
 
-    if (norm_w) {
+    if (!expand_layer && norm_w) {
         weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
 
         ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
@@ -2177,13 +2323,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     bool     use_partition   = false; // set below; the graph and the runtime planner must agree
     if (msl) {
         // worst-case distinct experts: n_expert_used per token, but never more than n_expert total
-        const uint64_t n_touch_max = std::min<uint64_t>((uint64_t) n_expert, (uint64_t) n_tokens*n_expert_used);
+        const uint64_t n_touch_max = std::min<uint64_t>((uint64_t) n_expert, (uint64_t) n_tokens*expert_rows);
         if (n_touch_max > msl->n_slots) {
             // the cache must hold three sets at once: this wave's experts, the next wave's preloaded
             //   experts (so its loads overlap this wave's compute), and n_expert_used parking slots
             //   the masked-out pairs GEMM against (Metal needs a slot at most once per token row).
             //   so cap + cap + n_expert_used = n_slots -> cap = (n_slots - n_expert_used)/2
-            stream_wave_cap = msl->n_slots > (uint32_t) n_expert_used ? (msl->n_slots - (uint32_t) n_expert_used)/2 : 0;
+            stream_wave_cap = msl->n_slots > (uint32_t) expert_rows ? (msl->n_slots - (uint32_t) expert_rows)/2 : 0;
 
             // LLAMA_MOE_STREAM_WAVE_CAP overrides the capacity, i.e. the wave count, WITHOUT touching
             // the preload - the two were conflated in an earlier test and that made its result
@@ -2199,15 +2345,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             bool cap_forced = false;
             if (const char * s = getenv("LLAMA_MOE_STREAM_WAVE_CAP")) {
                 const uint32_t want = (uint32_t) std::max(1, atoi(s));
-                stream_wave_cap = std::clamp(want, (uint32_t) n_expert_used,
-                                             msl->n_slots - (uint32_t) n_expert_used);
+                stream_wave_cap = std::clamp(want, (uint32_t) expert_rows,
+                                             msl->n_slots - (uint32_t) expert_rows);
                 cap_forced = true;
             }
-            if (stream_wave_cap < (uint32_t) n_expert_used) {
+            if (stream_wave_cap < (uint32_t) expert_rows) {
                 // a wave must fit at least n_expert_used experts, i.e. n_slots >= 3*n_expert_used
                 GGML_ABORT("MoE expert streaming: multi-pass expert GEMMs need an expert cache of at least "
-                           "3*n_expert_used slots (have %u, need %u); increase --moe-stream-cache or reduce -ub",
-                        msl->n_slots, 3*(uint32_t) n_expert_used);
+                           "3*expert_rows slots (have %u, need %u); increase --moe-stream-cache or reduce -ub",
+                        msl->n_slots, 3*(uint32_t) expert_rows);
             }
             n_stream_waves = (uint32_t) ((n_touch_max + stream_wave_cap - 1)/stream_wave_cap); // ceil(n_touch_max/cap)
 
@@ -2227,7 +2373,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             if (moe_stream_partition()) {
                 constexpr uint64_t pairs_per_wave_min = 600;
 
-                const uint64_t n_pairs   = (uint64_t) n_tokens*n_expert_used;
+                const uint64_t n_pairs   = (uint64_t) n_tokens*expert_rows;
                 const uint32_t max_waves = (uint32_t) std::max<uint64_t>(1, n_pairs/pairs_per_wave_min);
 
                 if (cap_forced && n_stream_waves > max_waves) {
@@ -2244,11 +2390,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
                 if (!cap_forced && n_stream_waves > max_waves) {
                     // widen the waves to fit the budget, but never past the residency invariant above
-                    const uint32_t cap_max = msl->n_slots > (uint32_t) n_expert_used
-                        ? (msl->n_slots - (uint32_t) n_expert_used)/2 : 0;
+                    const uint32_t cap_max = msl->n_slots > (uint32_t) expert_rows
+                        ? (msl->n_slots - (uint32_t) expert_rows)/2 : 0;
                     const uint32_t want    = (uint32_t) ((n_touch_max + max_waves - 1)/max_waves);
 
-                    stream_wave_cap = std::clamp(want, (uint32_t) n_expert_used, std::max(cap_max, (uint32_t) n_expert_used));
+                    stream_wave_cap = std::clamp(want, (uint32_t) expert_rows, std::max(cap_max, (uint32_t) expert_rows));
                     n_stream_waves  = (uint32_t) ((n_touch_max + stream_wave_cap - 1)/stream_wave_cap);
                 }
 
@@ -2262,7 +2408,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                 // back to the masked path, which is correct at any imbalance. Nothing is lost: the
                 // whole point of partitioning is to stop recomputing a large expert GEMM per wave, and
                 // at these sizes that GEMM is trivial anyway.
-                use_partition = (uint64_t) n_tokens*n_expert_used >= (uint64_t) n_stream_waves*pairs_per_wave_min;
+                use_partition = (uint64_t) n_tokens*expert_rows >= (uint64_t) n_stream_waves*pairs_per_wave_min;
 
                 // Leave one spare expert slot per wave, so the planner's split pass always has a
                 // receiver. A split moves a hot expert's surplus pairs into another wave, which
@@ -2362,7 +2508,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     if (weight_before_ffn) {
         // repeat cur to [n_embd, n_expert_used, n_tokens]
-        ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
+        ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, expert_rows, n_tokens, 1);
         cur = ggml_mul(ctx0, repeated, weights);
         cb(cur, "ffn_moe_weighted", il);
     }
@@ -2534,7 +2680,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         // wave gathers its own pairs into a dense list, runs the GEMMs once over that list with the
         // expert dimension collapsed to 1, and scatters the rows back. The masked path below instead
         // runs every wave over every pair, which is what makes its cost scale with the wave count.
-        const int64_t n_pairs = (int64_t) n_expert_used*n_tokens;
+        const int64_t n_pairs = (int64_t) expert_rows*n_tokens;
 
         // Static bound on one wave's pair count. ggml shapes are fixed before the router has run, so
         // this cannot depend on the routing - and it must be a PROOF, not a tuned slack.
@@ -2632,7 +2778,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         experts = ggml_view_2d(ctx0, experts, n_embd, n_pairs, experts->nb[1], 0); // drop the scratch row
-        experts = ggml_reshape_3d(ctx0, experts, n_embd, n_expert_used, n_tokens);
+        experts = ggml_reshape_3d(ctx0, experts, n_embd, expert_rows, n_tokens);
     } else if (msl && n_stream_waves > 1) {
         // plan_pair_chunk doubles as the signal that THIS graph is partitioned: the runtime planner
         // keys off it rather than off the env var, so a ubatch that falls back to masking cannot be
@@ -2660,7 +2806,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
             ggml_tensor * margs[2] = { ids_cont, ids_w };
             ggml_tensor * mask_w = ggml_custom_4d(ctx0, GGML_TYPE_F32,
-                    1, n_expert_used, n_tokens, 1,
+                    1, expert_rows, n_tokens, 1,
                     margs, 2, llama_moe_stream_wave_mask, 1, msl->wave_userdata(w, stream_wave_cap));
             cb(mask_w, "ffn_moe_wave_mask", il);
 

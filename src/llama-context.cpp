@@ -131,6 +131,15 @@ llama_context::llama_context(
     embd_layer_inp.resize(hparams.n_layer() + 1);
 
     cparams.ctx_type          = params.ctx_type;
+    cparams.expert_expand             = params.expert_expand;
+    cparams.expert_expand_layer_begin = params.expert_expand_layer_begin;
+    cparams.expert_expand_layer_end   = params.expert_expand_layer_end;
+    cparams.expert_expand_threshold   = params.expert_expand_threshold;
+    cparams.expert_expand_decay_end   = params.expert_expand_decay_end;
+
+    expert_expand_ctx = { (int32_t) hparams.n_expert, (int32_t) hparams.n_expert_used,
+                          (int32_t) params.expert_expand, params.expert_expand_threshold,
+                          params.expert_expand_decay_end };
     cparams.rope_scaling_type = params.rope_scaling_type;
     cparams.pooling_type      = params.pooling_type;
 
@@ -2534,6 +2543,7 @@ llm_graph_params llama_context::graph_params(
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
         /*.mstream     =*/ model.moe_stream(),
+        /*.expand_ctx  =*/ &expert_expand_ctx,
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
@@ -3701,6 +3711,11 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.expert_expand               =*/ 0,
+        /*.expert_expand_layer_begin   =*/ -1,
+        /*.expert_expand_layer_end     =*/ -1,
+        /*.expert_expand_threshold     =*/ 0.80f,
+        /*.expert_expand_decay_end     =*/ 0.50f,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,

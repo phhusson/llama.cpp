@@ -2419,6 +2419,55 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KV_OFFLOAD"));
     add_opt(common_arg(
+        {"--expert-expand"}, "N",
+        "layer-scoped expert-budget expansion (training-free): widen the MoE admission budget to N "
+        "experts (>= native top-K) within --expert-expand-layers, with a relative probability "
+        "threshold and linear decay on the additional experts (0 = off; ref: Zenodo 22255483)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.expert_expand = (uint32_t) value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--expert-expand-layers"}, "A-B",
+        "contiguous 0-based MoE layer range [A,B] that uses expanded routing; outside it routing "
+        "is the exact native top-K",
+        [](common_params & params, const std::string & value) {
+            int a = -1, b = -1;
+            if (sscanf(value.c_str(), "%d-%d", &a, &b) != 2 || a < 0 || b < a) {
+                throw std::invalid_argument("expected A-B with 0 <= A <= B");
+            }
+            params.expert_expand_layer_begin = a;
+            params.expert_expand_layer_end   = b;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--expert-expand-threshold"}, "F",
+        "relative admission threshold: rank k (k > N/4) is admitted only while p[k] >= F x p[R], "
+        "R = rank N/2 (default 0.8; 0 admits exactly N)",
+        [](common_params & params, const std::string & value) {
+            const float f = std::stof(value);
+            if (f < 0.0f) {
+                throw std::invalid_argument("value must be >= 0");
+            }
+            params.expert_expand_threshold = f;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--expert-expand-decay-end"}, "F",
+        "linear decay factor at the last admitted rank; the first additional rank (K+1) keeps 0.99 "
+        "(default 0.5)",
+        [](common_params & params, const std::string & value) {
+            const float f = std::stof(value);
+            if (f < 0.0f || f > 1.0f) {
+                throw std::invalid_argument("value must be in [0,1]");
+            }
+            params.expert_expand_decay_end = f;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--repack"},
         {"-nr", "--no-repack"},
         string_format("whether to enable weight repacking (default: %s)", params.no_extra_bufts ? "disabled" : "enabled"),

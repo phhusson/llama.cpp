@@ -54,6 +54,13 @@ struct llama_cparams {
     bool kv_unified;
     bool pipeline_parallel;
 
+    // layer-scoped expert-budget expansion (Zenodo 22255483); expert_expand = 0 disables
+    uint32_t expert_expand        = 0;
+    int32_t  expert_expand_layer_begin = -1;
+    int32_t  expert_expand_layer_end   = -1;
+    float    expert_expand_threshold   = 0.80f;
+    float    expert_expand_decay_end   = 0.50f;
+
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
 
     enum llama_context_type ctx_type;

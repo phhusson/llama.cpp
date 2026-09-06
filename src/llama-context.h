@@ -281,6 +281,9 @@ private:
 
     llama_cparams cparams;
 
+    // persistent userdata for the graph build's expert-budget expansion ops
+    llm_expand_ctx expert_expand_ctx;
+
     llama_adapter_cvec_ptr  cvec;
     llama_adapter_loras_ptr loras;
 
