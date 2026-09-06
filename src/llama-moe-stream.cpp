@@ -1010,27 +1010,13 @@ void llama_moe_stream_service_gpu(void * user_data, void * state_host, int32_t l
     sl->service_requests(*mgr);
 }
 
-void llama_moe_stream_remap(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata) {
-    GGML_UNUSED(nth);
-    if (ith != 0) {
-        return;
-    }
-
-    // timed from before the lock: lock acquisition is on the critical path too, since the GPU sits
-    // idle while this CPU-side op runs as a graph dependency
-    const int64_t t_op0 = ggml_time_us();
-
-    auto * sl  = (llama_moe_stream_layer *) userdata;
+// The shared core of the remap ops: map the selected expert ids (already slot-resolved order is
+// caller-provided) to cache slots, loading any missing experts. `ids` is the flat contiguous
+// selection; `n` its element count. The lock is taken here.
+static void remap_core(ggml_tensor * dst, const int32_t * ids, int64_t n, llama_moe_stream_layer * sl, int64_t t_op0) {
     auto * mgr = sl->mgr;
 
-    GGML_ASSERT(a->type == GGML_TYPE_I32);
-    GGML_ASSERT(ggml_is_contiguous(a));
-    GGML_ASSERT(ggml_are_same_shape(a, dst));
-
-    const int64_t n = ggml_nelements(a);
-
-    const int32_t * ids = (const int32_t *) a->data;
-          int32_t * out = (int32_t *) dst->data;
+    int32_t * out = (int32_t *) dst->data;
 
     std::unique_lock<std::mutex> lk(mgr->mtx);
 
@@ -1292,6 +1278,130 @@ static void llama_moe_stream_prefetch_next(llama_moe_stream_lookahead * la, cons
         }
         mgr->stats.n_preload_issued++;
     }
+}
+
+// Cache-aware expert substitution: for each token, boost every resident expert's router score by
+// substitute_margin x this token's selected score range and re-pick the same number of experts.
+// Deterministic (stable at equal effective scores, originals first) and a no-op at margin 0.
+static void substitute_ids(llama_moe_stream_layer & sl, int32_t * ids, int64_t n,
+                           const float * probs, int32_t n_used, int32_t n_tok) {
+    const float margin = sl.mgr->substitute_margin;
+    if (margin <= 0.0f || n_used <= 0 || n_tok <= 0) {
+        return;
+    }
+
+    // resident expert ids (RESIDENT and LOADING entries), sorted for determinism
+    std::vector<int32_t> resident;
+    resident.reserve(sl.expert_slot.size());
+    for (const auto & kv : sl.expert_slot) {
+        resident.push_back(kv.first);
+    }
+    std::sort(resident.begin(), resident.end());
+
+    std::vector<float>   scores(sl.n_expert);
+    std::vector<int32_t> cand_ids;
+    std::vector<float>   cand_eff;
+    std::vector<uint8_t> in_cand(sl.n_expert);
+    std::vector<int32_t> order;
+
+    for (int32_t t = 0; t < n_tok; t++) {
+        const int32_t * sel = ids + (int64_t) t*n_used;
+        const float   * prb = probs + (int64_t) t*sl.n_expert;
+
+        memcpy(scores.data(), prb, sl.n_expert*sizeof(float));
+
+        float lo =  INFINITY;
+        float hi = -INFINITY;
+        for (int32_t j = 0; j < n_used; j++) {
+            const float s = scores[sel[j]];
+            lo = std::min(lo, s);
+            hi = std::max(hi, s);
+        }
+        const float range = hi - lo;
+
+        // candidates: originals first (stable tie-break), then residents by id
+        cand_ids.clear();
+        cand_eff.clear();
+        memset(in_cand.data(), 0, in_cand.size());
+        for (int32_t j = 0; j < n_used; j++) {
+            const int32_t e = sel[j];
+            if (!in_cand[e]) {
+                in_cand[e] = 1;
+                cand_ids.push_back(e);
+                cand_eff.push_back(scores[e]);
+            }
+        }
+        for (const int32_t e : resident) {
+            if (!in_cand[e]) {
+                in_cand[e] = 1;
+                cand_ids.push_back(e);
+                cand_eff.push_back(scores[e] + margin*range);
+            }
+        }
+
+        order.resize(cand_ids.size());
+        for (size_t i = 0; i < order.size(); i++) {
+            order[i] = (int32_t) i;
+        }
+        std::stable_sort(order.begin(), order.end(), [&](int32_t x, int32_t y) {
+            return cand_eff[x] > cand_eff[y];
+        });
+        for (int32_t j = 0; j < n_used; j++) {
+            ids[(int64_t) t*n_used + j] = cand_ids[order[j]];
+        }
+    }
+}
+
+void llama_moe_stream_remap_sub(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, int ith, int nth, void * userdata) {
+    GGML_UNUSED(nth);
+    if (ith != 0) {
+        return;
+    }
+
+    auto * sl = (llama_moe_stream_layer *) userdata;
+
+    // unusable input or disabled feature -> plain remap (exact routing preserved)
+    if (sl->mgr->substitute_margin <= 0.0f || b == nullptr || !ggml_is_contiguous(b) ||
+            b->type != GGML_TYPE_F32 || (uint32_t) b->ne[0] != sl->n_expert) {
+        llama_moe_stream_remap(dst, a, ith, nth, userdata);
+        return;
+    }
+
+    GGML_ASSERT(a->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(ggml_are_same_shape(a, dst));
+
+    const int64_t n      = ggml_nelements(a);
+    const int32_t n_used = (int32_t) a->ne[0];
+    const int32_t n_tok  = (int32_t) std::max<int64_t>(ggml_nelements(a) / std::max<int32_t>(n_used, 1), 0);
+
+    std::vector<int32_t> ids(n);
+    memcpy(ids.data(), a->data, n*sizeof(int32_t));
+
+    if (n_used > 0 && (int64_t) b->ne[1] == n_tok) {
+        std::unique_lock<std::mutex> lk(sl->mgr->mtx); // read the resident set
+        substitute_ids(*sl, ids.data(), n, (const float *) b->data, n_used, n_tok);
+        lk.unlock();
+    }
+
+    remap_core(dst, ids.data(), n, sl, ggml_time_us());
+}
+
+void llama_moe_stream_remap(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata) {
+    GGML_UNUSED(nth);
+    if (ith != 0) {
+        return;
+    }
+
+    auto * sl  = (llama_moe_stream_layer *) userdata;
+
+    GGML_ASSERT(a->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(a));
+    GGML_ASSERT(ggml_are_same_shape(a, dst));
+
+    const int64_t n = ggml_nelements(a);
+
+    remap_core(dst, (const int32_t *) a->data, n, sl, ggml_time_us());
 }
 
 void llama_moe_stream_remap_la(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, int ith, int nth, void * userdata) {

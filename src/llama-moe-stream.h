@@ -292,6 +292,11 @@ struct llama_moe_stream {
 
     bool use_direct_io = false; // O_DIRECT streaming reads (LLAMA_MOE_STREAM_DIRECT), no page cache
 
+    // cache-aware expert substitution: a resident expert may displace a selected one only when it
+    // scores within substitute_margin x this token's score range of it. 0 = off. Lossy and
+    // cache-dependent. Applied at decode (single-wave remap) only.
+    float substitute_margin = 0.0f;
+
     llama_files files; // privately reopened GGUF files, same indices as the loader's
 
     llama_moe_stream_ple ple;
@@ -446,6 +451,12 @@ static const int32_t LLAMA_MOE_GPU_SLOT_MAX_TOKENS = 32;
 
 // callback of the id-remapping custom op inserted by build_moe_ffn
 void llama_moe_stream_remap(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata);
+
+// id-remapping with cache-aware expert substitution: src b is the router's full per-token gate
+// scores (f32 [n_expert, n_tokens], the same tensor ggml_top_k selected from); before mapping the
+// selected ids to slots, resident experts are boosted by substitute_margin x the token's selected
+// score range and re-ranked against the selection, keeping the same expert count.
+void llama_moe_stream_remap_sub(ggml_tensor * dst, const ggml_tensor * a, const ggml_tensor * b, int ith, int nth, void * userdata);
 
 // remap for THIS layer (src a, as above) plus a lookahead prefetch for the next layer driven by
 // this layer's router input (src b, f32 [n_embd] already multiplied by the next layer's gate_inp,
