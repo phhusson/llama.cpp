@@ -2276,7 +2276,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             // The prediction skips the attention and FFN terms between the layers - a lower bound,
             // but the exact version would need layer L+1's attention output, i.e. attention twice
             // per layer.
-            if (msl->la && msl->la->sl_next && msl->la_gate_inp) {
+            if (msl->mgr->substitute_margin > 0.0f && selection_probs != nullptr &&
+                    ggml_is_contiguous(selection_probs) && selection_probs->type == GGML_TYPE_F32 &&
+                    selection_probs->ne[0] == (int64_t) msl->n_expert && selection_probs->ne[1] == ids_cont->ne[1]) {
+                // cache-aware substitution: reroute selected ids toward resident experts within
+                // the configured margin, using the same per-token scores the top-k selected from
+                ids_gemm = ggml_map_custom2(ctx0, ids_cont, selection_probs, llama_moe_stream_remap_sub, 1, msl);
+            } else if (msl->la && msl->la->sl_next && msl->la_gate_inp) {
                 ggml_tensor * la_logits = ggml_mul_mat(ctx0, msl->la_gate_inp, cur);
                 ggml_mul_mat_set_prec(la_logits, GGML_PREC_F32);
                 cb(la_logits, "ffn_moe_logits_next", il);

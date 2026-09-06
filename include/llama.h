@@ -346,6 +346,7 @@ extern "C" {
         uint64_t moe_stream_budget;     // total cache byte budget, used when slots == 0 (0 = auto heuristic)
         int32_t  moe_stream_io_threads; // expert load I/O threads (<= 0 = default)
         bool     moe_stream_direct;     // use O_DIRECT for expert reads (bypass page cache); falls back if unsupported
+        float    moe_stream_substitute; // 0 = off; >0: bias decode routing toward resident experts (lossy)
 
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
