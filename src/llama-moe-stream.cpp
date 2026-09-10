@@ -1494,8 +1494,9 @@ void llama_moe_stream::plan_waves_locked(llama_moe_stream_layer & sl, const int3
     }
     sl.wave_first.assign(sl.plan_n_waves, 0);
     sl.wave_count.assign(sl.plan_n_waves, 0);
-    {
-        // spread the experts evenly over exactly plan_n_waves slices, never exceeding plan_capacity
+    if (sl.plan_pair_chunk > 0) {
+        // partition path: spread the experts evenly over exactly plan_n_waves slices, never
+        // exceeding plan_capacity (the pair balancer below reorders them again)
         const size_t base = n_uniq/sl.plan_n_waves;
         const size_t rem  = n_uniq%sl.plan_n_waves;
         size_t at = 0;
@@ -1506,10 +1507,23 @@ void llama_moe_stream::plan_waves_locked(llama_moe_stream_layer & sl, const int3
             at += cnt;
         }
         GGML_ASSERT(at == n_uniq); // every touched expert belongs to exactly one wave
+    } else {
+        // masked path: pack full groups of plan_capacity. Every wave but the last then holds at
+        // least n_expert_used experts, which is what the parking-pool invariant of
+        // stage_wave_locked needs; an even split can leave a wave below n_expert_used and the
+        // parking pool comes up short.
+        size_t at = 0;
         for (uint32_t w = 0; w < sl.plan_n_waves; w++) {
-            for (uint32_t i = 0; i < sl.wave_count[w]; i++) {
-                sl.expert_wave[sl.uniq[sl.wave_first[w] + i]] = (uint8_t) w;
-            }
+            const size_t cnt = std::min<size_t>(sl.plan_capacity, n_uniq - at);
+            sl.wave_first[w] = (uint32_t) at;
+            sl.wave_count[w] = (uint32_t) cnt;
+            at += cnt;
+        }
+        GGML_ASSERT(at == n_uniq); // every touched expert belongs to exactly one wave
+    }
+    for (uint32_t w = 0; w < sl.plan_n_waves; w++) {
+        for (uint32_t i = 0; i < sl.wave_count[w]; i++) {
+            sl.expert_wave[sl.uniq[sl.wave_first[w] + i]] = (uint8_t) w;
         }
     }
 
@@ -1759,14 +1773,18 @@ void llama_moe_stream::stage_wave_locked(std::unique_lock<std::mutex> & lk, llam
     sl.demand_slots.clear();
 
     // a small final wave has fewer than n_ids own slots; borrow the rest from the previous wave's
-    //   pool so every token row has n_ids distinct resident parking slots for its masked pairs
+    //   pool so every token row has n_ids distinct resident parking slots for its masked pairs.
+    //   wave 0 always holds plan_capacity experts (the planner packs full groups), so it never
+    //   borrows; a single-wave plan needs no parking at all.
     std::vector<int32_t> borrowed;
-    if (count < n_ids) {
-        GGML_ASSERT(sl.plan_pool.size() >= n_ids - count);
-        for (size_t i = 0; i < n_ids - count; i++) {
+    if (count < n_ids && sl.plan_n_waves > 1) {
+        const size_t need = n_ids - count;
+        const size_t have = std::min(need, sl.plan_pool.size());
+        for (size_t i = 0; i < have; i++) {
             borrowed.push_back(sl.plan_pool[i]);
             sl.keep[sl.plan_pool[i]] = 1; // parking slots must survive this wave's loads
         }
+        GGML_ASSERT(borrowed.size() == need);
     }
 
     // protect the next wave's already-resident experts so this wave's victims do not evict them.
@@ -1897,10 +1915,21 @@ void llama_moe_stream::stage_wave_locked(std::unique_lock<std::mutex> & lk, llam
     }
 
     // parking pool: this wave's own resident slots plus the borrowed ones (all keep-protected;
-    //   the next same-layer reservation is ordered after this wave's GEMMs by the graph)
-    sl.plan_pool = sl.demand_slots;
-    sl.plan_pool.insert(sl.plan_pool.end(), borrowed.begin(), borrowed.end());
-    GGML_ASSERT(sl.plan_pool.size() >= n_ids);
+    //   the next same-layer reservation is ordered after this wave's GEMMs by the graph).
+    //   Deduplicated: a borrowed slot and one of this wave's experts can share a slot, and a
+    //   duplicate would leave too few distinct parking slots for a token row.
+    sl.plan_pool.clear();
+    for (const int32_t s : sl.demand_slots) {
+        if (std::find(sl.plan_pool.begin(), sl.plan_pool.end(), s) == sl.plan_pool.end()) {
+            sl.plan_pool.push_back(s);
+        }
+    }
+    for (const int32_t s : borrowed) {
+        if (std::find(sl.plan_pool.begin(), sl.plan_pool.end(), s) == sl.plan_pool.end()) {
+            sl.plan_pool.push_back(s);
+        }
+    }
+    GGML_ASSERT(sl.plan_n_waves <= 1 || sl.plan_pool.size() >= n_ids);
 }
 
 // write out[i] = the cache slot the GEMM should index for each (token, expert) pair of wave w, one
@@ -1908,6 +1937,15 @@ void llama_moe_stream::stage_wave_locked(std::unique_lock<std::mutex> & lk, llam
 // resident pool slots (pool_used prevents a repeat within the row, required by the Metal kernel)
 void llama_moe_stream::emit_wave_slots(llama_moe_stream_layer & sl, const int32_t * ids, int32_t * out,
         int32_t w, uint32_t n_ids, int64_t n_tok) {
+    if ((uint32_t) w >= sl.plan_n_waves) {
+        // the planner needed fewer waves than the graph built: this wave owns no expert, so its
+        // mask is zero for every pair and any in-range slot produces a discarded result
+        for (int64_t i = 0; i < n_tok*n_ids; i++) {
+            out[i] = 0;
+        }
+        return;
+    }
+
     for (int64_t t = 0; t < n_tok; t++) {
         sl.pool_used.clear();
 
@@ -1932,10 +1970,10 @@ void llama_moe_stream::emit_wave_slots(llama_moe_stream_layer & sl, const int32_
             if (sl.expert_wave[ids[i]] == (uint8_t) w) {
                 continue;
             }
-            while (std::find(sl.pool_used.begin(), sl.pool_used.end(), sl.plan_pool[pi]) != sl.pool_used.end()) {
+            while (pi < sl.plan_pool.size() && std::find(sl.pool_used.begin(), sl.pool_used.end(), sl.plan_pool[pi]) != sl.pool_used.end()) {
                 pi++;
-                GGML_ASSERT(pi < sl.plan_pool.size());
             }
+            GGML_ASSERT(pi < sl.plan_pool.size());
             GGML_ASSERT(sl.slot_state[sl.plan_pool[pi]] == LLAMA_MOE_STREAM_SLOT_RESIDENT);
             out[i] = sl.plan_pool[pi];
             sl.pool_used.push_back(sl.plan_pool[pi]);
