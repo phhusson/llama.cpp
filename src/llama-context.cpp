@@ -392,6 +392,7 @@ llama_context::llama_context(
         // GPU stalls on a shared event while this fills them, which is what lets the streaming
         // graph run without a CPU op (and therefore without a scheduler split) per layer.
         if (auto * mstream = model.moe_stream(); mstream != nullptr && mstream->gpu_slot >= 3) {
+#ifdef GGML_USE_METAL
             bool ok = false;
             for (auto & backend : backends) {
                 if (ggml_backend_is_metal(backend.get())) {
@@ -402,6 +403,9 @@ llama_context::llama_context(
             if (!ok) {
                 throw std::runtime_error("LLAMA_MOE_STREAM_GPU_SLOT=3 requires the Metal backend");
             }
+#else
+            throw std::runtime_error("LLAMA_MOE_STREAM_GPU_SLOT=3 requires the Metal backend");
+#endif
         }
 
         // create a list of the set_n_threads functions in the backends

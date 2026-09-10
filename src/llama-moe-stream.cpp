@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
