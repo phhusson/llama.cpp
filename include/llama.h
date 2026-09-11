@@ -346,7 +346,12 @@ extern "C" {
         uint64_t moe_stream_budget;     // total cache byte budget, used when slots == 0 (0 = auto heuristic)
         int32_t  moe_stream_io_threads; // expert load I/O threads (<= 0 = default)
         bool     moe_stream_direct;     // use O_DIRECT for expert reads (bypass page cache); falls back if unsupported
-        float    moe_stream_substitute; // 0 = off; >0: bias decode routing toward resident experts (lossy)
+        float    moe_stream_substitute;    // 0 = off; >0: bias decode routing toward resident experts (lossy)
+        float    moe_stream_substitute_pp; // 0 = off; >0: same bias, for prefill batches only (lossy)
+        // NULL-terminated list of devices whose MoE routed experts stay fully resident (expert SSD
+        // streaming disabled on them). Devices not listed stream, and the local CPU always streams
+        // (it cannot be named here). NULL = stream on all devices.
+        ggml_backend_dev_t * moe_stream_not_on_devices;
 
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights

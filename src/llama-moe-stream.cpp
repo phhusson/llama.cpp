@@ -1286,7 +1286,7 @@ static void llama_moe_stream_prefetch_next(llama_moe_stream_lookahead * la, cons
 // Deterministic (stable at equal effective scores, originals first) and a no-op at margin 0.
 static void substitute_ids(llama_moe_stream_layer & sl, int32_t * ids, int64_t n,
                            const float * probs, int32_t n_used, int32_t n_tok) {
-    const float margin = sl.mgr->substitute_margin;
+    const float margin = n_tok > 1 ? sl.mgr->substitute_margin_pp : sl.mgr->substitute_margin;
     if (margin <= 0.0f || n_used <= 0 || n_tok <= 0) {
         return;
     }
@@ -1362,7 +1362,7 @@ void llama_moe_stream_remap_sub(ggml_tensor * dst, const ggml_tensor * a, const 
     auto * sl = (llama_moe_stream_layer *) userdata;
 
     // unusable input or disabled feature -> plain remap (exact routing preserved)
-    if (sl->mgr->substitute_margin <= 0.0f || b == nullptr || !ggml_is_contiguous(b) ||
+    if ((sl->mgr->substitute_margin <= 0.0f && sl->mgr->substitute_margin_pp <= 0.0f) || b == nullptr || !ggml_is_contiguous(b) ||
             b->type != GGML_TYPE_F32 || (uint32_t) b->ne[0] != sl->n_expert) {
         llama_moe_stream_remap(dst, a, ith, nth, userdata);
         return;

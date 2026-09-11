@@ -294,8 +294,9 @@ struct llama_moe_stream {
 
     // cache-aware expert substitution: a resident expert may displace a selected one only when it
     // scores within substitute_margin x this token's score range of it. 0 = off. Lossy and
-    // cache-dependent. Applied at decode (single-wave remap) only.
-    float substitute_margin = 0.0f;
+    // cache-dependent. substitute_margin applies to decode, substitute_margin_pp to prefill.
+    float substitute_margin    = 0.0f;
+    float substitute_margin_pp = 0.0f;
 
     llama_files files; // privately reopened GGUF files, same indices as the loader's
 

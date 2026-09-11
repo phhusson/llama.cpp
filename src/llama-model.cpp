@@ -1181,6 +1181,23 @@ struct llama_model::impl {
     // MoE expert SSD streaming state, null when not enabled
     std::unique_ptr<llama_moe_stream> moe_stream;
 
+    // devices whose routed experts stay resident; empty = stream on every device
+    std::vector<ggml_backend_dev_t> moe_stream_not_on_devices;
+
+    // whether expert SSD streaming applies to a layer on this device
+    bool moe_stream_enabled_for(ggml_backend_dev_t dev) const {
+        // streaming reads the GGUF through a host callback, so it cannot run on a remote RPC backend
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg != nullptr && strcmp(ggml_backend_reg_name(reg), "RPC") == 0) {
+            return false;
+        }
+        if (moe_stream_not_on_devices.empty()) {
+            return true;
+        }
+        return std::find(moe_stream_not_on_devices.begin(), moe_stream_not_on_devices.end(), dev)
+                == moe_stream_not_on_devices.end();
+    }
+
     std::vector<float> tensor_split_owned;
 };
 
@@ -1443,11 +1460,68 @@ static bool llama_moe_stream_is_exps_name(const std::string & name) {
     return false;
 }
 
+// extract the block index from a tensor name "blk.<il>.<...>"; -1 if it is not a block tensor
+static int llama_moe_stream_layer_of_name(const std::string & name) {
+    if (name.compare(0, 4, "blk.") != 0) {
+        return -1;
+    }
+    const size_t dot = name.find('.', 4);
+    if (dot == std::string::npos) {
+        return -1;
+    }
+    try {
+        return std::stoi(name.substr(4, dot - 4));
+    } catch (...) {
+        return -1;
+    }
+}
+
+// whether expert streaming applies to the layer that owns this expert tensor
+static bool llama_moe_stream_streams(
+        const std::vector<ggml_backend_dev_t> & layer_devs,
+        const std::vector<ggml_backend_dev_t> & not_on_devices,
+        const llama_hparams &                   hparams,
+        const std::string &                     name,
+        const llama_model_loader::llama_tensor_weight * w) {
+    if (!llama_moe_stream_is_exps_name(name) || w->tensor->ne[2] != hparams.n_expert) {
+        return false;
+    }
+    const int il = llama_moe_stream_layer_of_name(name);
+    if (il < 0 || (size_t) il >= layer_devs.size()) {
+        return false;
+    }
+    const ggml_backend_dev_t dev = layer_devs[il];
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    if (reg != nullptr && strcmp(ggml_backend_reg_name(reg), "RPC") == 0) {
+        return false; // remote layers always load resident
+    }
+    return std::find(not_on_devices.begin(), not_on_devices.end(), dev) == not_on_devices.end();
+}
+
 // resolve the per-layer expert cache slot count; returns 0 when streaming should not be enabled
 // (not a MoE model, or the cache would hold every expert anyway)
-static uint32_t llama_moe_stream_resolve_slots(const llama_model_params & params, const llama_hparams & hparams, const llama_model_loader & ml) {
+static uint32_t llama_moe_stream_resolve_slots(
+        const llama_model_params &              params,
+        const llama_hparams &                   hparams,
+        const llama_model_loader &              ml,
+        const std::vector<ggml_backend_dev_t> & layer_devs,
+        const std::vector<ggml_backend_dev_t> & not_on_devices) {
     if (hparams.n_expert == 0 || hparams.n_expert_used_max() == 0) {
         LLAMA_LOG_WARN("%s: MoE expert streaming requires a MoE model -- disabled\n", __func__);
+        return 0;
+    }
+
+    // Sum one expert's bytes across only the layers that will actually stream. Layers kept resident
+    // via --moe-stream-not-on-devices are materialized in full and must not dilute the cache budget.
+    size_t nb_expert_sum = 0;
+    for (const auto & [name, w] : ml.weights_map) {
+        if (llama_moe_stream_streams(layer_devs, not_on_devices, hparams, name, &w)) {
+            nb_expert_sum += ggml_nbytes(w.tensor)/w.tensor->ne[2];
+        }
+    }
+
+    if (nb_expert_sum == 0) {
+        LLAMA_LOG_WARN("%s: no layers selected for MoE expert streaming -- disabled\n", __func__);
         return 0;
     }
 
@@ -1455,15 +1529,7 @@ static uint32_t llama_moe_stream_resolve_slots(const llama_model_params & params
 
     if (n_slots == 0 && params.moe_stream_budget > 0) {
         // derive the per-layer slot count from the total byte budget
-        size_t nb_expert_sum = 0; // bytes of one expert across every streamable layer
-        for (const auto & [name, w] : ml.weights_map) {
-            if (llama_moe_stream_is_exps_name(name) && w.tensor->ne[2] == hparams.n_expert) {
-                nb_expert_sum += ggml_nbytes(w.tensor)/w.tensor->ne[2];
-            }
-        }
-        if (nb_expert_sum > 0) {
-            n_slots = std::max<uint64_t>(params.moe_stream_budget/nb_expert_sum, hparams.n_expert_used_max());
-        }
+        n_slots = std::max<uint64_t>(params.moe_stream_budget/nb_expert_sum, hparams.n_expert_used_max());
     }
 
     if (n_slots == 0) {
@@ -1595,14 +1661,25 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
+    // devices whose experts stay resident (streaming disabled); empty = stream everywhere
+    pimpl->moe_stream_not_on_devices.clear();
+    for (const ggml_backend_dev_t * dev = params.moe_stream_not_on_devices; dev != nullptr && *dev != nullptr; ++dev) {
+        pimpl->moe_stream_not_on_devices.push_back(*dev);
+    }
+
     if (params.moe_stream) {
-        const uint32_t n_slots = llama_moe_stream_resolve_slots(params, hparams, ml);
+        std::vector<ggml_backend_dev_t> layer_devs(n_layer_all);
+        for (int il = 0; il < n_layer_all; ++il) {
+            layer_devs[il] = pimpl->dev_layer[il].dev;
+        }
+        const uint32_t n_slots = llama_moe_stream_resolve_slots(params, hparams, ml, layer_devs, pimpl->moe_stream_not_on_devices);
         if (n_slots > 0) {
             if (pimpl->has_tensor_overrides) {
                 LLAMA_LOG_WARN("%s: tensor buffer overrides (-ot/--cpu-moe) do not apply to SSD-streamed expert tensors\n", __func__);
             }
             pimpl->moe_stream = std::make_unique<llama_moe_stream>(n_layer_all, n_slots, params.moe_stream_io_threads, params.moe_stream_direct);
-            pimpl->moe_stream->substitute_margin = params.moe_stream_substitute;
+            pimpl->moe_stream->substitute_margin    = params.moe_stream_substitute;
+            pimpl->moe_stream->substitute_margin_pp = params.moe_stream_substitute_pp;
             LLAMA_LOG_INFO("%s: MoE expert SSD streaming enabled, %u of %u experts cached per layer, %d I/O threads\n",
                     __func__, n_slots, hparams.n_expert, pimpl->moe_stream->n_io_threads);
         }
@@ -2004,6 +2081,7 @@ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM
 
     // route MoE routed-expert weights to the streaming expert cache instead of materializing them
     if (pimpl->moe_stream && tn.bid >= 0 && buft_list_layer != nullptr &&
+        pimpl->moe_stream_enabled_for(pimpl->dev_layer.at(tn.bid).dev) &&
         (flags & (TENSOR_DUPLICATED | TENSOR_SKIP | TENSOR_SKIP_IF_VIRTUAL)) == 0 &&
         llama_moe_stream_is_exps(tn.tensor) && tn.suffix != nullptr && strcmp(tn.suffix, "weight") == 0) {
         const std::string name = tn.str();
@@ -2960,6 +3038,8 @@ llama_model_params llama_model_default_params() {
         /*.moe_stream_io_threads       =*/ 0,
         /*.moe_stream_direct           =*/ false,
         /*.moe_stream_substitute       =*/ 0.0f,
+        /*.moe_stream_substitute_pp    =*/ 0.0f,
+        /*.moe_stream_not_on_devices   =*/ nullptr,
         /*.vocab_only                  =*/ false,
         /*.check_tensors               =*/ false,
         /*.use_extra_bufts             =*/ true,

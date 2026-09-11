@@ -606,7 +606,9 @@ struct common_params {
     uint64_t moe_stream_budget     = 0;     // total expert cache byte budget, used when slots == 0 (0 = auto)
     int32_t  moe_stream_io_threads = 0;     // expert load I/O threads (<= 0 = default)
     bool     moe_stream_direct     = false; // use O_DIRECT for expert reads (bypass page cache)
-    float    moe_stream_substitute = 0.0f;  // 0 = off; >0: bias decode routing toward resident experts (lossy)
+    float    moe_stream_substitute = 0.0f;     // 0 = off; >0: bias decode routing toward resident experts (lossy)
+    float    moe_stream_substitute_pp = 0.0f;  // 0 = off; >0: same bias, for prefill batches only (lossy)
+    std::vector<ggml_backend_dev_t> moe_stream_not_on_devices; // devices whose experts stay resident (streaming disabled)
 
     bool single_turn       = false; // single turn chat conversation
 

@@ -2477,7 +2477,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             // The prediction skips the attention and FFN terms between the layers - a lower bound,
             // but the exact version would need layer L+1's attention output, i.e. attention twice
             // per layer.
-            if (msl->mgr->substitute_margin > 0.0f && selection_probs != nullptr &&
+            const float sub_margin = n_tokens > 1 ? msl->mgr->substitute_margin_pp : msl->mgr->substitute_margin;
+            if (sub_margin > 0.0f && selection_probs != nullptr &&
                     ggml_is_contiguous(selection_probs) && selection_probs->type == GGML_TYPE_F32 &&
                     selection_probs->ne[0] == (int64_t) msl->n_expert && selection_probs->ne[1] == ids_cont->ne[1]) {
                 // cache-aware substitution: reroute selected ids toward resident experts within

@@ -2890,6 +2890,29 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.moe_stream_substitute = f;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_MOE_STREAM_SUBSTITUTE"));
+    add_opt(common_arg(
+        {"--moe-stream-substitute-pp"}, "F",
+        "cache-aware expert substitution for --moe-stream prefill: like --moe-stream-substitute, but "
+        "applied to prompt-processing batches only (0.0 = off, lossy and cache-dependent; default: 0.0)",
+        [](common_params & params, const std::string & value) {
+            const float f = std::stof(value);
+            if (f < 0.0f || f > 1.0f) {
+                throw std::invalid_argument("value must be in [0,1]");
+            }
+            params.moe_stream = true;
+            params.moe_stream_substitute_pp = f;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_MOE_STREAM_SUBSTITUTE_PP"));
+    add_opt(common_arg(
+        {"--moe-stream-not-on-devices"}, "<dev1,dev2,..>",
+        "comma-separated list of devices that keep their MoE routed experts fully resident instead "
+        "of streaming them from disk; implies --moe-stream. Devices not listed stream, and the local "
+        "CPU always streams (it cannot be named here). Use --list-devices to see device names",
+        [](common_params & params, const std::string & value) {
+            params.moe_stream = true;
+            params.moe_stream_not_on_devices = parse_device_list(value);
+        }
+    ).set_env("LLAMA_ARG_MOE_STREAM_NOT_ON_DEVICES"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
