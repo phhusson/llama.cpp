@@ -93,6 +93,22 @@ typedef struct VkPhysicalDeviceCooperativeMatrixDecodeVectorFeaturesNV {
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
+#ifdef GGML_VULKAN_XRT
+#include "ggml-alloc.h"
+#include <xrt/xrt_bo.h>
+#include <xrt/xrt_device.h>
+#include <xrt/xrt_hw_context.h>
+#include <xrt/xrt_kernel.h>
+#include <nlohmann/json.hpp>
+#include <chrono>
+#include <fstream>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#include <system_error>
+#include <unistd.h>
+struct ggml_vk_npu;
+#endif
+
 #include "ggml-vulkan-shaders.hpp"
 
 // On 32-bit platforms, Vulkan non-dispatchable handles such as VkBuffer are represented as uint64_t,
@@ -866,6 +882,9 @@ struct vk_device_struct {
     uint64_t suballocation_block_size;
     uint64_t min_imported_host_pointer_alignment;
     bool external_memory_host {};
+#ifdef GGML_VULKAN_XRT
+    bool external_memory_dma_buf {}, external_memory_fd {}, external_semaphore_fd {}, queue_family_foreign {}, external_memory_acquire_unmodified {}, npu_shared_memory {};
+#endif
     bool fp16;
     bool bf16;
     bool pipeline_robustness;
@@ -1307,12 +1326,47 @@ struct vk_buffer_struct {
 
     vk_device device;
 
+#ifdef GGML_VULKAN_XRT
+    bool npu_exportable = false;
+    int npu_dma_fd = -1;
+    std::mutex npu_mutex;
+    std::unique_ptr<xrt::bo> npu_bo;
+    struct npu_weight_state {
+        bool valid;
+        bool prepared = false;
+        bool uploaded = true;
+    };
+    std::map<std::pair<size_t, size_t>, npu_weight_state> npu_scales;
+
+    void npu_written(size_t offset, size_t bytes) {
+        std::lock_guard<std::mutex> lock(npu_mutex);
+        for (auto it = npu_scales.begin(); it != npu_scales.end();) {
+            const auto & range = it->first;
+            if (offset < range.first + range.second && range.first < offset + bytes) {
+                if (it->second.prepared) {
+                    it->second.valid = false;
+                    it->second.uploaded = true;
+                    ++it;
+                } else {
+                    it = npu_scales.erase(it);
+                }
+            } else {
+                ++it;
+            }
+        }
+    }
+#endif
+
     ~vk_buffer_struct() {
         if (size == 0) {
             return;
         }
         VK_LOG_DEBUG("~vk_buffer_struct(" << buffer << ", " << size << ")");
 
+#ifdef GGML_VULKAN_XRT
+        npu_bo.reset();
+        if (npu_dma_fd >= 0) close(npu_dma_fd);
+#endif
         device->device.freeMemory(device_memory);
         device->device.destroyBuffer(buffer);
     }
@@ -1331,6 +1385,7 @@ struct vk_subbuffer {
 struct vk_semaphore {
     vk::Semaphore s;
     uint64_t value;
+    vk::PipelineStageFlags stages{};
 };
 
 // vk_event is used for the event-related backend interfaces. It uses vk::Events for
@@ -2524,6 +2579,13 @@ class vk_perf_logger {
 struct ggml_backend_vk_context {
     std::string name;
 
+#ifdef GGML_VULKAN_XRT
+    std::shared_ptr<ggml_vk_npu> npu;
+    bool npu_blocking_wait = false;
+    vk::QueryPool npu_profile_pool{};
+    int npu_profile_query = -1;
+#endif
+
     vk_device device;
 
     size_t semaphore_idx, event_idx;
@@ -2595,6 +2657,10 @@ struct ggml_backend_vk_context {
 };
 
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
+
+#ifdef GGML_VULKAN_XRT
+static void ggml_vk_npu_finish(ggml_backend_vk_context * ctx);
+#endif
 
 static uint64_t vk_tensor_offset(const ggml_tensor * tensor) {
     if (tensor->view_src) {
@@ -2835,6 +2901,18 @@ static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context *
 
 // Wait for ctx->fence to be signaled.
 static void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx) {
+#ifdef GGML_VULKAN_XRT
+    // Let the CPU sleep while the GPU and NPU share the APU power budget.
+    if (ctx->npu_blocking_wait) {
+        VK_CHECK(ctx->device->device.waitForFences({ctx->fence}, true, UINT64_MAX), "NPU split fence", ctx->device);
+        ctx->device->device.resetFences({ctx->fence});
+        if (ctx->almost_ready_fence_pending) {
+            ctx->device->device.resetFences({ctx->almost_ready_fence});
+            ctx->almost_ready_fence_pending = false;
+        }
+        return;
+    }
+#endif
     // Use waitForFences while most of the graph executes. Hopefully the CPU can sleep
     // during this wait.
     if (ctx->almost_ready_fence_pending) {
@@ -3447,7 +3525,7 @@ static void ggml_vk_submit(vk_context& ctx, vk::Fence fence) {
             tl_signal_vals.push_back({});
             tl_signal_semaphores.push_back({});
             for (size_t i = 0; i < submission.wait_semaphores.size(); i++) {
-                stage_flags[idx].push_back(ctx->p->q->stage_flags);
+                stage_flags[idx].push_back(submission.wait_semaphores[i].stages ? submission.wait_semaphores[i].stages : ctx->p->q->stage_flags);
                 tl_wait_vals[idx].push_back(submission.wait_semaphores[i].value);
                 tl_wait_semaphores[idx].push_back(submission.wait_semaphores[i].s);
             }
@@ -3688,6 +3766,13 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     };
 
     vk::ExternalMemoryBufferCreateInfo external_memory_bci;
+#ifdef GGML_VULKAN_XRT
+    buf->npu_exportable = !import_ptr && device->npu_shared_memory;
+    if (buf->npu_exportable) {
+        external_memory_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+        buffer_create_info.setPNext(&external_memory_bci);
+    }
+#endif
     if (import_ptr) {
         external_memory_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
         buffer_create_info.setPNext(&external_memory_bci);
@@ -3706,6 +3791,28 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     if (device->memory_priority) {
         mem_flags_info.setPNext(&mem_priority_info);
     }
+
+#ifdef GGML_VULKAN_XRT
+    vk::ExportMemoryAllocateInfo export_info;
+    vk::MemoryDedicatedAllocateInfo dedicated_info;
+    if (buf->npu_exportable) {
+        const auto props = device->physical_device.getExternalBufferProperties(
+            {{}, usage_flags, vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT});
+        const auto features = props.externalMemoryProperties.externalMemoryFeatures;
+        if (!(features & vk::ExternalMemoryFeatureFlagBits::eExportable)) {
+            device->device.destroyBuffer(buf->buffer);
+            throw std::runtime_error("Q5_K NPU: Vulkan buffer cannot be exported as dma-buf");
+        }
+        export_info.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+        export_info.pNext = mem_flags_info.pNext;
+        if (features & vk::ExternalMemoryFeatureFlagBits::eDedicatedOnly) {
+            dedicated_info.buffer = buf->buffer;
+            dedicated_info.pNext = export_info.pNext;
+            export_info.pNext = &dedicated_info;
+        }
+        mem_flags_info.pNext = &export_info;
+    }
+#endif
 
     if (import_ptr) {
         vk::MemoryHostPointerPropertiesEXT host_pointer_props;
@@ -6676,6 +6783,18 @@ static vk_device ggml_vk_get_device(size_t idx) {
                 device->memory_priority = true;
             } else if (strcmp("VK_EXT_external_memory_host", properties.extensionName) == 0) {
                 device->external_memory_host = true;
+#ifdef GGML_VULKAN_XRT
+            } else if (strcmp("VK_EXT_external_memory_dma_buf", properties.extensionName) == 0) {
+                device->external_memory_dma_buf = true;
+            } else if (strcmp("VK_KHR_external_memory_fd", properties.extensionName) == 0) {
+                device->external_memory_fd = true;
+            } else if (strcmp("VK_KHR_external_semaphore_fd", properties.extensionName) == 0) {
+                device->external_semaphore_fd = true;
+            } else if (strcmp("VK_EXT_queue_family_foreign", properties.extensionName) == 0) {
+                device->queue_family_foreign = true;
+            } else if (strcmp("VK_EXT_external_memory_acquire_unmodified", properties.extensionName) == 0) {
+                device->external_memory_acquire_unmodified = true;
+#endif
 #if defined(VK_EXT_shader_64bit_indexing)
             } else if (strcmp("VK_EXT_shader_64bit_indexing", properties.extensionName) == 0) {
                 device->shader_64b_indexing = true;
@@ -7027,6 +7146,27 @@ static vk_device ggml_vk_get_device(size_t idx) {
         if (device->external_memory_host) {
             device_extensions.push_back("VK_EXT_external_memory_host");
         }
+
+#ifdef GGML_VULKAN_XRT
+        if (getenv("GGML_VK_NPU_Q5_K_DIR")) {
+            if (!device->external_memory_dma_buf || !device->external_memory_fd || !device->external_semaphore_fd || !device->queue_family_foreign) {
+                throw std::runtime_error("Q5_K NPU: Vulkan requires dma-buf, memory-fd, semaphore-fd and foreign queue extensions");
+            }
+            const auto sem_props = device->physical_device.getExternalSemaphoreProperties({vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd});
+            const auto sem_features = vk::ExternalSemaphoreFeatureFlagBits::eImportable | vk::ExternalSemaphoreFeatureFlagBits::eExportable;
+            if ((sem_props.externalSemaphoreFeatures & sem_features) != sem_features) {
+                throw std::runtime_error("Q5_K NPU: Vulkan cannot import and export sync_file semaphores");
+            }
+            device_extensions.push_back("VK_EXT_external_memory_dma_buf");
+            device_extensions.push_back("VK_KHR_external_memory_fd");
+            device_extensions.push_back("VK_KHR_external_semaphore_fd");
+            device_extensions.push_back("VK_EXT_queue_family_foreign");
+            if (device->external_memory_acquire_unmodified) {
+                device_extensions.push_back("VK_EXT_external_memory_acquire_unmodified");
+            }
+            device->npu_shared_memory = true;
+        }
+#endif
 
 #if defined(VK_EXT_shader_64bit_indexing)
         VkPhysicalDeviceShader64BitIndexingFeaturesEXT shader_64bit_indexing_features {};
@@ -8754,6 +8894,9 @@ static void ggml_vk_buffer_write_nc_async(ggml_backend_vk_context * ctx, vk_cont
 
 static bool ggml_vk_buffer_write_2d_async(vk_context subctx, vk_buffer& dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height, bool sync_staging = false) {
     VK_LOG_DEBUG("ggml_vk_buffer_write_2d_async(" << width << ", " << height << ")");
+#ifdef GGML_VULKAN_XRT
+    if (height) dst->npu_written(offset, (height - 1) * dpitch + width);
+#endif
     // Check if src is pinned memory
     vk_buffer buf = nullptr;
     size_t buf_offset = 0;
@@ -8827,6 +8970,9 @@ static bool ggml_vk_buffer_write_async(vk_context subctx, vk_buffer& dst, size_t
 
 static void ggml_vk_buffer_write_2d(vk_buffer& dst, size_t offset, const void * src, size_t spitch, size_t dpitch, size_t width, size_t height) {
     VK_LOG_DEBUG("ggml_vk_buffer_write_2d(" << width << ", " << height << ")");
+#ifdef GGML_VULKAN_XRT
+    if (height) dst->npu_written(offset, (height - 1) * dpitch + width);
+#endif
     // Buffer is already mapped
     if(dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible) {
         GGML_ASSERT(dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent);
@@ -9005,6 +9151,9 @@ static void ggml_vk_buffer_read(vk_buffer& src, size_t offset, void * dst, size_
 }
 
 static void ggml_vk_buffer_copy_async(vk_context& ctx, vk_buffer& dst, size_t dst_offset, vk_buffer& src, size_t src_offset, size_t size) {
+#ifdef GGML_VULKAN_XRT
+    dst->npu_written(dst_offset, size);
+#endif
     VK_LOG_DEBUG("ggml_vk_buffer_copy_async(" << size << ")");
     // Make sure both buffers are on same device
     GGML_ASSERT(src->device == dst->device);
@@ -9040,6 +9189,9 @@ static void ggml_vk_buffer_copy(vk_buffer& dst, size_t dst_offset, vk_buffer& sr
 }
 
 static void ggml_vk_buffer_memset_async(vk_context& ctx, vk_buffer& dst, size_t offset, uint32_t c, size_t size) {
+#ifdef GGML_VULKAN_XRT
+    dst->npu_written(offset, size);
+#endif
     VK_LOG_DEBUG("ggml_vk_buffer_memset_async(" << offset << ", " << c << ", " << size << ")");
 
     if (dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible &&
@@ -9053,6 +9205,9 @@ static void ggml_vk_buffer_memset_async(vk_context& ctx, vk_buffer& dst, size_t 
 }
 
 static void ggml_vk_buffer_memset(vk_buffer& dst, size_t offset, uint32_t c, size_t size) {
+#ifdef GGML_VULKAN_XRT
+    dst->npu_written(offset, size);
+#endif
     VK_LOG_DEBUG("ggml_vk_buffer_memset(" << offset << ", " << c << ", " << size << ")");
 
     if (dst->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible &&
@@ -16222,6 +16377,12 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         }
     }
 
+#ifdef GGML_VULKAN_XRT
+    if (ctx->npu_profile_query >= 0) {
+        compute_ctx->s->buffer->buf.writeTimestamp(vk::PipelineStageFlagBits::eAllCommands, ctx->npu_profile_pool, ctx->npu_profile_query);
+    }
+#endif
+
     // closed explicitly below, and by the destructor on the early returns
     ggml_vk_debug_label dbg(compute_ctx, cgraph, node_idx, ctx->num_additional_fused_ops);
 
@@ -16629,6 +16790,12 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         return false;
     }
 
+#ifdef GGML_VULKAN_XRT
+    if (ctx->npu_profile_query >= 0) {
+        compute_ctx->s->buffer->buf.writeTimestamp(vk::PipelineStageFlagBits::eAllCommands, ctx->npu_profile_pool, ctx->npu_profile_query + 1);
+    }
+#endif
+
     // the submit path below can end the command buffer, so close the region first
     dbg.close();
 
@@ -16757,6 +16924,10 @@ static void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
 
     ggml_vk_graph_cleanup(ctx);
 
+#ifdef GGML_VULKAN_XRT
+    ggml_vk_npu_finish(ctx);
+    ctx->npu.reset();
+#endif
     ggml_vk_destroy_buffer(ctx->prealloc_x);
     ggml_vk_destroy_buffer(ctx->prealloc_y);
     ggml_vk_destroy_buffer(ctx->prealloc_split_k);
@@ -17362,6 +17533,9 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
     ggml_vk_synchronize(ctx);
+#ifdef GGML_VULKAN_XRT
+    ggml_vk_npu_finish(ctx);
+#endif
 
     ggml_vk_graph_cleanup(ctx);
 }
@@ -18104,7 +18278,7 @@ static int32_t find_first_set(uint32_t x) {
     return ret;
 }
 
-static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+static ggml_status ggml_backend_vk_graph_compute_gpu(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
@@ -18598,6 +18772,14 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
     UNUSED(backend);
 }
+
+#ifdef GGML_VULKAN_XRT
+#include "ggml-vulkan-npu.hpp"
+#else
+static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    return ggml_backend_vk_graph_compute_gpu(backend, cgraph);
+}
+#endif
 
 // Sort the graph for improved parallelism.
 static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, struct ggml_backend_graph_optimize_params * params)

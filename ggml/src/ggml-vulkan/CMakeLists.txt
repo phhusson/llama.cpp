@@ -64,6 +64,16 @@ if (Vulkan_FOUND)
                              ../../include/ggml-vulkan.h
                             )
 
+    option(GGML_VULKAN_XRT "Local Q5_K GPU/NPU experiment (Linux XRT)" OFF)
+    if (GGML_VULKAN_XRT)
+        find_path(XRT_INCLUDE_DIR xrt/xrt_bo.h REQUIRED)
+        find_library(XRT_COREUTIL xrt_coreutil REQUIRED)
+        target_compile_definitions(ggml-vulkan PRIVATE GGML_VULKAN_XRT)
+        target_include_directories(ggml-vulkan PRIVATE ${XRT_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../../vendor)
+        target_link_libraries(ggml-vulkan PRIVATE ${XRT_COREUTIL})
+        target_sources(ggml-vulkan PRIVATE ggml-vulkan-npu.hpp)
+    endif()
+
     set(VULKAN_SHADER_GEN_CMAKE_ARGS "")
 
     # Test all shader extensions
