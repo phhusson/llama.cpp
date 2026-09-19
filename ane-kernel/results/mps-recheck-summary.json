@@ -1,0 +1,128 @@
+[
+  {
+    "name": "on-f055",
+    "mps": true,
+    "ane_fraction": 0.55,
+    "ane_requests": 2944,
+    "metal_only_mps_matmuls": 0,
+    "graphs": 8,
+    "benchmarks": [
+      {
+        "n_prompt": 4096,
+        "n_gen": 0,
+        "avg_ts": 104.048379,
+        "stddev_ts": 0.307792,
+        "samples_ts": [
+          104.219,
+          103.693,
+          104.233
+        ],
+        "samples_ns": [
+          39301761375,
+          39501197834,
+          39296639333
+        ]
+      },
+      {
+        "n_prompt": 0,
+        "n_gen": 32,
+        "avg_ts": 10.577134,
+        "stddev_ts": 0.017099,
+        "samples_ts": [
+          10.5798,
+          10.5589,
+          10.5927
+        ],
+        "samples_ns": [
+          3024632375,
+          3030630584,
+          3020935584
+        ]
+      }
+    ]
+  },
+  {
+    "name": "off-f055",
+    "mps": false,
+    "ane_fraction": 0.55,
+    "ane_requests": 2944,
+    "metal_only_mps_matmuls": 0,
+    "graphs": 8,
+    "benchmarks": [
+      {
+        "n_prompt": 4096,
+        "n_gen": 0,
+        "avg_ts": 84.183211,
+        "stddev_ts": 0.134424,
+        "samples_ts": [
+          84.2979,
+          84.2165,
+          84.0353
+        ],
+        "samples_ns": [
+          48589603667,
+          48636554916,
+          48741437292
+        ]
+      },
+      {
+        "n_prompt": 0,
+        "n_gen": 32,
+        "avg_ts": 10.587448,
+        "stddev_ts": 0.008457,
+        "samples_ts": [
+          10.5782,
+          10.5893,
+          10.5948
+        ],
+        "samples_ns": [
+          3025081750,
+          3021925542,
+          3020337750
+        ]
+      }
+    ]
+  },
+  {
+    "name": "on-f000",
+    "mps": true,
+    "ane_fraction": 0.0,
+    "ane_requests": 0,
+    "metal_only_mps_matmuls": 2944,
+    "graphs": 8,
+    "benchmarks": [
+      {
+        "n_prompt": 4096,
+        "n_gen": 0,
+        "avg_ts": 59.930364,
+        "stddev_ts": 0.021101,
+        "samples_ts": [
+          59.9399,
+          59.9062,
+          59.945
+        ],
+        "samples_ns": [
+          68335147833,
+          68373577666,
+          68329259375
+        ]
+      },
+      {
+        "n_prompt": 0,
+        "n_gen": 32,
+        "avg_ts": 10.54458,
+        "stddev_ts": 0.008725,
+        "samples_ts": [
+          10.5485,
+          10.5346,
+          10.5507
+        ],
+        "samples_ns": [
+          3033618291,
+          3037613042,
+          3032976542
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,106 @@
+{
+  "started_utc": "2026-09-19T21:11:10.537627+00:00",
+  "commit": "1a07bfa5f4144274c8f1c9963821dd9d9a51854b",
+  "dirty": true,
+  "command": [
+    "ane-kernel/run.sh",
+    "build/bin/llama-bench",
+    "-m",
+    "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+    "-p",
+    "4096",
+    "-n",
+    "32",
+    "-b",
+    "4096",
+    "-ub",
+    "2048",
+    "-ngl",
+    "99",
+    "-fa",
+    "on",
+    "-r",
+    "3",
+    "-o",
+    "json",
+    "-v"
+  ],
+  "warmup": true,
+  "repetitions": 3,
+  "order": [
+    "on-f055",
+    "off-f055",
+    "on-f000"
+  ],
+  "layout": "load-time planar for every configuration",
+  "sha256": {
+    "ggml/src/ggml-metal/ggml-metal-ops.cpp": "48540f5930990c6aa964aff5a2ce49f22591590d246f9c3c156376b181398ee1",
+    "ggml/src/ggml-metal/ggml-metal-common.cpp": "59977f06933b580c87b0652aa9f0ea9fdfc8a9b02a843079ed9bbbd45feca38d",
+    "ggml/src/ggml-metal/ggml-metal-device.cpp": "b579f0dd3e0a587ad36788e506cb663945a78126eb88bc6ff3cb46900f244bca",
+    "ggml/src/ggml-metal/ggml-metal.cpp": "ca29276c29ba04da9eaed94aedc61aa2121e6cd747c4f3a5e19c8e2f8a3825fa",
+    "ggml/src/ggml-metal/ggml-metal-tuning.cpp": "ce040a83e55378b80d3efa9f8c989b49f7a68a68d8b8fdfc7b7f3ac869ae662a",
+    "ggml/src/ggml-metal/ggml-metal-device.m": "dfa3874f90ec40634dabf489b3fa70079d0054f75994a315114e4082ce124885",
+    "ggml/src/ggml-metal/ggml-metal-pq2.m": "601c61051867b189369e935476fdedea127fdaad63a5c77b0a38a242cf330803",
+    "ggml/src/ggml-metal/ggml-metal-context.m": "5c2f4f2a353bb5d3398689c43b263dda40d827f16e908c8fa40d006924a79d1a",
+    "ggml/src/ggml-metal/ggml-metal-ane.m": "6fd59de0a74fbd270e5990e900117e63a3abfd4809f0d0115d9f8fcdf79f964b",
+    "ggml/src/ggml-metal/ggml-metal-common.h": "4c69de12a20585115b7dd544aa0509c950ed580ec8ba2e8c4cc7097db8e7e795",
+    "ggml/src/ggml-metal/ggml-metal-tuning.h": "72a4cd7eff3da6bb24951e35cb3a2184ad8db86fea8ff85352c4f385d00348c0",
+    "ggml/src/ggml-metal/ggml-metal-ops.h": "3bf433c9c351c29d111e78e4791e35bcdf84c250dd1874da1bf19e88e99b3494",
+    "ggml/src/ggml-metal/ggml-metal-ane.h": "95ee7c8b54b82a7405e925601de86390be67234f86906ff72a8a9e843782ce41",
+    "ggml/src/ggml-metal/ggml-metal-device.h": "3a705defd3bd36bd9c3b1d88bd9929219fc3667474d4d2368571377e2bb8f033",
+    "ggml/src/ggml-metal/ggml-metal-pq2.h": "287a3b5b7cc8642af3114ffed2b134f54714d564505a82bf92aead3df02a4567",
+    "ggml/src/ggml-metal/ggml-metal-context.h": "b8729c5cfc8ec0dcf8f9485b9c8d1af83af37fa53d83c910f0ae6ee88eb6aef5",
+    "ggml/src/ggml-metal/ggml-metal-impl.h": "54090db7d0086244709c4ef8fc48ef754e2e1fee48a6079ba019f6223371927b",
+    "ggml/include/ggml-backend.h": "e4de24daad00b290d3728439b3f350c8d8f7fbe4dbfa1521b42734ec2c78c5ac",
+    "src/llama-model-loader.cpp": "9ea3aaae7cd2665ac6e8e762a9ac2b968a278155a7adc6fc157ff43112fe2582",
+    "src/llama-model.cpp": "28ed225d58d820f5d5fc40a7a6002068457afffcca581641d2cf9e460744355e",
+    "ane-kernel/run.sh": "c85818e849252f01c9cc784230568d5c38d029b9ab450a14a22bb20e75529b45",
+    "build/bin/libggml-metal.dylib": "7881b3d14964b829c0593c24a10795417bc94a2b2c19beb6882e0e348c14f95a",
+    "build/bin/libllama.dylib": "d23f658475ce868b845e4d780b31b3d97f1eb8a0769bc35c69f439b9970ab677",
+    "build/bin/llama-bench": "4b7f964c3b8a79daa52c2f316f456afbe3b0b92ecee8487f258d3f5fd06a1b03",
+    "ggml/src/ggml-metal/kernels/dequantize.h": "54268693cb156a2e4c258ff62ee69db684f0c55b994d042d991463e9543312f2",
+    "ggml/src/ggml-metal/kernels/mul_mm.metal": "89b29c62c721de87e8f75b6d5c3e43734cd817eed7f850c18d37843bfefc17c4",
+    "ggml/src/ggml-metal/kernels/mul_mv.metal": "4172f54dbade037957c09efaeafd1b77ea81749924be1e8b979ae1e8b8c0cfdf"
+  },
+  "runs": [
+    {
+      "name": "on-f055",
+      "started_utc": "2026-09-19T21:11:10.551049+00:00",
+      "env": {
+        "GGML_METAL_ANE_FRACTION": ".55",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "json": "ane-kernel/results/mps-recheck-on-f055.json",
+      "log": "ane-kernel/results/mps-recheck-on-f055.log",
+      "exit_code": 0,
+      "wall_seconds": 186.93135295899992
+    },
+    {
+      "name": "off-f055",
+      "started_utc": "2026-09-19T21:14:17.487398+00:00",
+      "env": {
+        "GGML_METAL_ANE_FRACTION": ".55",
+        "GGML_METAL_ANE_PROFILE": "1",
+        "GGML_METAL_ANE_MPS_DISABLE": "1"
+      },
+      "json": "ane-kernel/results/mps-recheck-off-f055.json",
+      "log": "ane-kernel/results/mps-recheck-off-f055.log",
+      "exit_code": 0,
+      "wall_seconds": 221.21742820899817
+    },
+    {
+      "name": "on-f000",
+      "started_utc": "2026-09-19T21:17:58.682100+00:00",
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "json": "ane-kernel/results/mps-recheck-on-f000.json",
+      "log": "ane-kernel/results/mps-recheck-on-f000.log",
+      "exit_code": 0,
+      "wall_seconds": 296.2915607080067
+    }
+  ],
+  "finished_utc": "2026-09-19T21:23:38.559954+00:00",
+  "source_unchanged_through_runs": true
+}

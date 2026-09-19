@@ -1,0 +1,324 @@
+[
+  {
+    "fraction": 0.55,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        9472
+      ],
+      [
+        5120,
+        10240,
+        5632
+      ],
+      [
+        5120,
+        6144,
+        3328
+      ],
+      [
+        5120,
+        12288,
+        6656
+      ],
+      [
+        6144,
+        5120,
+        2816
+      ],
+      [
+        17408,
+        5120,
+        2816
+      ]
+    ],
+    "avg_ts": 103.982479,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      103.982
+    ],
+    "samples_ns": [
+      39391251708
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-00-f0.550000.json",
+    "log": "ane-kernel/results/fraction-coarse-00-f0.550000.log"
+  },
+  {
+    "fraction": 0.75,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        13056
+      ],
+      [
+        5120,
+        10240,
+        7680
+      ],
+      [
+        5120,
+        6144,
+        4608
+      ],
+      [
+        5120,
+        12288,
+        9216
+      ],
+      [
+        6144,
+        5120,
+        3840
+      ],
+      [
+        17408,
+        5120,
+        3840
+      ]
+    ],
+    "avg_ts": 102.181953,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      102.182
+    ],
+    "samples_ns": [
+      40085356417
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-01-f0.750000.json",
+    "log": "ane-kernel/results/fraction-coarse-01-f0.750000.log"
+  },
+  {
+    "fraction": 0.35,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        5888
+      ],
+      [
+        5120,
+        10240,
+        3584
+      ],
+      [
+        5120,
+        6144,
+        2048
+      ],
+      [
+        5120,
+        12288,
+        4096
+      ],
+      [
+        6144,
+        5120,
+        1792
+      ],
+      [
+        17408,
+        5120,
+        1792
+      ]
+    ],
+    "avg_ts": 81.964386,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      81.9644
+    ],
+    "samples_ns": [
+      49972923792
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-02-f0.350000.json",
+    "log": "ane-kernel/results/fraction-coarse-02-f0.350000.log"
+  },
+  {
+    "fraction": 1.0,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        17408
+      ],
+      [
+        5120,
+        10240,
+        10240
+      ],
+      [
+        5120,
+        6144,
+        6144
+      ],
+      [
+        5120,
+        12288,
+        12288
+      ],
+      [
+        6144,
+        5120,
+        5120
+      ],
+      [
+        17408,
+        5120,
+        5120
+      ]
+    ],
+    "avg_ts": 85.409892,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      85.4099
+    ],
+    "samples_ns": [
+      47956974084
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-03-f1.000000.json",
+    "log": "ane-kernel/results/fraction-coarse-03-f1.000000.log"
+  },
+  {
+    "fraction": 0.45,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        7680
+      ],
+      [
+        5120,
+        10240,
+        4608
+      ],
+      [
+        5120,
+        6144,
+        2560
+      ],
+      [
+        5120,
+        12288,
+        5376
+      ],
+      [
+        6144,
+        5120,
+        2304
+      ],
+      [
+        17408,
+        5120,
+        2304
+      ]
+    ],
+    "avg_ts": 92.406273,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      92.4063
+    ],
+    "samples_ns": [
+      44325995166
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-04-f0.450000.json",
+    "log": "ane-kernel/results/fraction-coarse-04-f0.450000.log"
+  },
+  {
+    "fraction": 0.85,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        14592
+      ],
+      [
+        5120,
+        10240,
+        8704
+      ],
+      [
+        5120,
+        6144,
+        5120
+      ],
+      [
+        5120,
+        12288,
+        10240
+      ],
+      [
+        6144,
+        5120,
+        4352
+      ],
+      [
+        17408,
+        5120,
+        4352
+      ]
+    ],
+    "avg_ts": 96.018303,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      96.0183
+    ],
+    "samples_ns": [
+      42658533625
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-05-f0.850000.json",
+    "log": "ane-kernel/results/fraction-coarse-05-f0.850000.log"
+  },
+  {
+    "fraction": 0.65,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        11264
+      ],
+      [
+        5120,
+        10240,
+        6656
+      ],
+      [
+        5120,
+        6144,
+        3840
+      ],
+      [
+        5120,
+        12288,
+        7936
+      ],
+      [
+        6144,
+        5120,
+        3328
+      ],
+      [
+        17408,
+        5120,
+        3328
+      ]
+    ],
+    "avg_ts": 115.252145,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      115.252
+    ],
+    "samples_ns": [
+      35539468708
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-coarse-06-f0.650000.json",
+    "log": "ane-kernel/results/fraction-coarse-06-f0.650000.log"
+  }
+]

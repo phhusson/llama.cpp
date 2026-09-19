@@ -1,0 +1,94 @@
+[
+  {
+    "fraction": 0.664,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        11520
+      ],
+      [
+        5120,
+        10240,
+        6656
+      ],
+      [
+        5120,
+        6144,
+        3840
+      ],
+      [
+        5120,
+        12288,
+        7936
+      ],
+      [
+        6144,
+        5120,
+        3328
+      ],
+      [
+        17408,
+        5120,
+        3328
+      ]
+    ],
+    "avg_ts": 113.614897,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      113.615
+    ],
+    "samples_ns": [
+      36051610333
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-plateaus-00-f0.664000.json",
+    "log": "ane-kernel/results/fraction-plateaus-00-f0.664000.log"
+  },
+  {
+    "fraction": 0.64,
+    "effective_rows": [
+      [
+        5120,
+        17408,
+        11008
+      ],
+      [
+        5120,
+        10240,
+        6400
+      ],
+      [
+        5120,
+        6144,
+        3840
+      ],
+      [
+        5120,
+        12288,
+        7680
+      ],
+      [
+        6144,
+        5120,
+        3072
+      ],
+      [
+        17408,
+        5120,
+        3072
+      ]
+    ],
+    "avg_ts": 110.356877,
+    "stddev_ts": 0.0,
+    "samples_ts": [
+      110.357
+    ],
+    "samples_ns": [
+      37115947042
+    ],
+    "ane_requests": 1472,
+    "json": "ane-kernel/results/fraction-plateaus-01-f0.640000.json",
+    "log": "ane-kernel/results/fraction-plateaus-01-f0.640000.log"
+  }
+]

@@ -1,0 +1,60 @@
+{
+  "planar-mps-pp4096": {
+    "pp4096": 103.373881,
+    "tg32": 10.586563,
+    "pp_samples": [
+      103.885,
+      103.339,
+      102.898
+    ],
+    "tg_samples": [
+      10.5935,
+      10.5758,
+      10.5904
+    ],
+    "ane_successes": 2944,
+    "graphs": 8,
+    "errors": [],
+    "conversion": [
+      "368 tensors, 6120.00 MiB, 8874.560 ms conversion"
+    ]
+  },
+  "jit-mps-pp4096": {
+    "pp4096": 105.24841,
+    "tg32": 10.248471,
+    "pp_samples": [
+      106.418,
+      105.035,
+      104.293
+    ],
+    "tg_samples": [
+      10.2124,
+      10.2586,
+      10.2744
+    ],
+    "ane_successes": 2944,
+    "graphs": 8,
+    "errors": [],
+    "conversion": []
+  },
+  "planar-fused-pp4096": {
+    "pp4096": 84.099209,
+    "tg32": 10.530734,
+    "pp_samples": [
+      84.2127,
+      84.0748,
+      84.0101
+    ],
+    "tg_samples": [
+      10.4743,
+      10.5333,
+      10.5846
+    ],
+    "ane_successes": 2944,
+    "graphs": 8,
+    "errors": [],
+    "conversion": [
+      "368 tensors, 6120.00 MiB, 7391.600 ms conversion"
+    ]
+  }
+}

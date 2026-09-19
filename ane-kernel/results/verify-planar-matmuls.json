@@ -1,0 +1,12 @@
+{
+  "matmuls": 736,
+  "scalar_outputs": 94208,
+  "max_relative_rms": {
+    "Metal": 2.7293e-06,
+    "ANE": 0.0013304
+  },
+  "ane_completions": 736,
+  "load_summary": [
+    "368 tensors, 6120.00 MiB, 6580.535 ms conversion"
+  ]
+}

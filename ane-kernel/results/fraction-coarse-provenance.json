@@ -1,0 +1,594 @@
+{
+  "started_utc": "2026-09-19T21:29:26.570372+00:00",
+  "commit": "1a07bfa5f4144274c8f1c9963821dd9d9a51854b",
+  "dirty": true,
+  "stage": "coarse",
+  "order": [
+    0.55,
+    0.75,
+    0.35,
+    1.0,
+    0.45,
+    0.85,
+    0.65
+  ],
+  "warmup": true,
+  "repetitions": 1,
+  "MPS": true,
+  "batch": 4096,
+  "microbatch": 2048,
+  "source_sha256": {
+    "ggml/src/ggml-metal/ggml-metal-ane.m": "6fd59de0a74fbd270e5990e900117e63a3abfd4809f0d0115d9f8fcdf79f964b",
+    "ggml/src/ggml-metal/ggml-metal-context.m": "5c2f4f2a353bb5d3398689c43b263dda40d827f16e908c8fa40d006924a79d1a",
+    "ggml/src/ggml-metal/ggml-metal-pq2.m": "601c61051867b189369e935476fdedea127fdaad63a5c77b0a38a242cf330803",
+    "ggml/src/ggml-metal/ggml-metal.cpp": "ca29276c29ba04da9eaed94aedc61aa2121e6cd747c4f3a5e19c8e2f8a3825fa",
+    "ggml/src/ggml-metal/ggml-metal-device.cpp": "b579f0dd3e0a587ad36788e506cb663945a78126eb88bc6ff3cb46900f244bca",
+    "ggml/src/ggml-metal/ggml-metal-ops.cpp": "48540f5930990c6aa964aff5a2ce49f22591590d246f9c3c156376b181398ee1",
+    "ggml/src/ggml-metal/kernels/dequantize.h": "54268693cb156a2e4c258ff62ee69db684f0c55b994d042d991463e9543312f2",
+    "ggml/src/ggml-metal/kernels/mul_mm.metal": "89b29c62c721de87e8f75b6d5c3e43734cd817eed7f850c18d37843bfefc17c4",
+    "ggml/src/ggml-metal/kernels/mul_mv.metal": "4172f54dbade037957c09efaeafd1b77ea81749924be1e8b979ae1e8b8c0cfdf",
+    "ane-kernel/generate.py": "525255a57611bfdac8cc43f1efa1c629dbcd4f4582c5de15bf13cf2ea87ae70f",
+    "ane-kernel/run.sh": "c85818e849252f01c9cc784230568d5c38d029b9ab450a14a22bb20e75529b45",
+    "build/bin/libggml-metal.dylib": "7881b3d14964b829c0593c24a10795417bc94a2b2c19beb6882e0e348c14f95a",
+    "build/bin/libllama.dylib": "d23f658475ce868b845e4d780b31b3d97f1eb8a0769bc35c69f439b9970ab677",
+    "build/bin/llama-bench": "4b7f964c3b8a79daa52c2f316f456afbe3b0b92ecee8487f258d3f5fd06a1b03"
+  },
+  "generation_commands": [
+    {
+      "command": [
+        "/tmp/pq2-coreml-venv/bin/python",
+        "ane-kernel/generate.py",
+        "--rows",
+        "2048",
+        "2560",
+        "3584",
+        "3840",
+        "4096",
+        "4608",
+        "5120",
+        "5376",
+        "5888",
+        "6144",
+        "7680",
+        "7936",
+        "8704",
+        "9216",
+        "10240",
+        "11264",
+        "12288",
+        "13056",
+        "14592",
+        "17408",
+        "--widths",
+        "5120",
+        "--tokens",
+        "2048",
+        "--chunk-k",
+        "2048",
+        "--output",
+        "/Users/phh/ML/bonsai-llama.cpp/ane-kernel/models"
+      ],
+      "log": "ane-kernel/results/fraction-coarse-generate-k5120.log",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/tmp/pq2-coreml-venv/bin/python",
+        "ane-kernel/generate.py",
+        "--rows",
+        "1792",
+        "2304",
+        "3328",
+        "3840",
+        "4352",
+        "5120",
+        "--widths",
+        "6144",
+        "--tokens",
+        "2048",
+        "--chunk-k",
+        "1024",
+        "--output",
+        "/Users/phh/ML/bonsai-llama.cpp/ane-kernel/models"
+      ],
+      "log": "ane-kernel/results/fraction-coarse-generate-k6144.log",
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/tmp/pq2-coreml-venv/bin/python",
+        "ane-kernel/generate.py",
+        "--rows",
+        "1792",
+        "2304",
+        "3328",
+        "3840",
+        "4352",
+        "5120",
+        "--widths",
+        "17408",
+        "--tokens",
+        "2048",
+        "--chunk-k",
+        "1024",
+        "--output",
+        "/Users/phh/ML/bonsai-llama.cpp/ane-kernel/models"
+      ],
+      "log": "ane-kernel/results/fraction-coarse-generate-k17408.log",
+      "exit_code": 0
+    }
+  ],
+  "runs": [
+    {
+      "fraction": 0.55,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          9472
+        ],
+        [
+          5120,
+          10240,
+          5632
+        ],
+        [
+          5120,
+          6144,
+          3328
+        ],
+        [
+          5120,
+          12288,
+          6656
+        ],
+        [
+          6144,
+          5120,
+          2816
+        ],
+        [
+          17408,
+          5120,
+          2816
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.55",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:30:43.166863+00:00",
+      "json": "ane-kernel/results/fraction-coarse-00-f0.550000.json",
+      "log": "ane-kernel/results/fraction-coarse-00-f0.550000.log",
+      "exit_code": 0,
+      "wall_seconds": 97.16290937500162
+    },
+    {
+      "fraction": 0.75,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          13056
+        ],
+        [
+          5120,
+          10240,
+          7680
+        ],
+        [
+          5120,
+          6144,
+          4608
+        ],
+        [
+          5120,
+          12288,
+          9216
+        ],
+        [
+          6144,
+          5120,
+          3840
+        ],
+        [
+          17408,
+          5120,
+          3840
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.75",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:32:20.332387+00:00",
+      "json": "ane-kernel/results/fraction-coarse-01-f0.750000.json",
+      "log": "ane-kernel/results/fraction-coarse-01-f0.750000.log",
+      "exit_code": 0,
+      "wall_seconds": 101.5296078340034
+    },
+    {
+      "fraction": 0.35,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          5888
+        ],
+        [
+          5120,
+          10240,
+          3584
+        ],
+        [
+          5120,
+          6144,
+          2048
+        ],
+        [
+          5120,
+          12288,
+          4096
+        ],
+        [
+          6144,
+          5120,
+          1792
+        ],
+        [
+          17408,
+          5120,
+          1792
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.35",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:34:01.867227+00:00",
+      "json": "ane-kernel/results/fraction-coarse-02-f0.350000.json",
+      "log": "ane-kernel/results/fraction-coarse-02-f0.350000.log",
+      "exit_code": 0,
+      "wall_seconds": 115.78401633400063
+    },
+    {
+      "fraction": 1.0,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          17408
+        ],
+        [
+          5120,
+          10240,
+          10240
+        ],
+        [
+          5120,
+          6144,
+          6144
+        ],
+        [
+          5120,
+          12288,
+          12288
+        ],
+        [
+          6144,
+          5120,
+          5120
+        ],
+        [
+          17408,
+          5120,
+          5120
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "1.0",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:35:57.654375+00:00",
+      "json": "ane-kernel/results/fraction-coarse-03-f1.000000.json",
+      "log": "ane-kernel/results/fraction-coarse-03-f1.000000.log",
+      "exit_code": 0,
+      "wall_seconds": 119.80329516699567
+    },
+    {
+      "fraction": 0.45,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          7680
+        ],
+        [
+          5120,
+          10240,
+          4608
+        ],
+        [
+          5120,
+          6144,
+          2560
+        ],
+        [
+          5120,
+          12288,
+          5376
+        ],
+        [
+          6144,
+          5120,
+          2304
+        ],
+        [
+          17408,
+          5120,
+          2304
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.45",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:37:57.462397+00:00",
+      "json": "ane-kernel/results/fraction-coarse-04-f0.450000.json",
+      "log": "ane-kernel/results/fraction-coarse-04-f0.450000.log",
+      "exit_code": 0,
+      "wall_seconds": 105.59959833299945
+    },
+    {
+      "fraction": 0.85,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          14592
+        ],
+        [
+          5120,
+          10240,
+          8704
+        ],
+        [
+          5120,
+          6144,
+          5120
+        ],
+        [
+          5120,
+          12288,
+          10240
+        ],
+        [
+          6144,
+          5120,
+          4352
+        ],
+        [
+          17408,
+          5120,
+          4352
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.85",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:39:43.065113+00:00",
+      "json": "ane-kernel/results/fraction-coarse-05-f0.850000.json",
+      "log": "ane-kernel/results/fraction-coarse-05-f0.850000.log",
+      "exit_code": 0,
+      "wall_seconds": 107.7250874579986
+    },
+    {
+      "fraction": 0.65,
+      "effective_rows": [
+        [
+          5120,
+          17408,
+          11264
+        ],
+        [
+          5120,
+          10240,
+          6656
+        ],
+        [
+          5120,
+          6144,
+          3840
+        ],
+        [
+          5120,
+          12288,
+          7936
+        ],
+        [
+          6144,
+          5120,
+          3328
+        ],
+        [
+          17408,
+          5120,
+          3328
+        ]
+      ],
+      "command": [
+        "ane-kernel/run.sh",
+        "build/bin/llama-bench",
+        "-m",
+        "/Users/phh/ML/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+        "-p",
+        "4096",
+        "-n",
+        "0",
+        "-b",
+        "4096",
+        "-ub",
+        "2048",
+        "-ngl",
+        "99",
+        "-fa",
+        "on",
+        "-r",
+        "1",
+        "-o",
+        "json",
+        "-v"
+      ],
+      "env": {
+        "GGML_METAL_ANE_FRACTION": "0.65",
+        "GGML_METAL_ANE_PROFILE": "1"
+      },
+      "started_utc": "2026-09-19T21:41:30.794704+00:00",
+      "json": "ane-kernel/results/fraction-coarse-06-f0.650000.json",
+      "log": "ane-kernel/results/fraction-coarse-06-f0.650000.log",
+      "exit_code": 0,
+      "wall_seconds": 89.81901741599722
+    }
+  ],
+  "finished_utc": "2026-09-19T21:43:00.631901+00:00",
+  "source_unchanged": true
+}

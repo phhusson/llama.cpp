@@ -1,0 +1,29 @@
+{
+  "commit": "1a07bfa5f4144274c8f1c9963821dd9d9a51854b",
+  "dirty": true,
+  "sha256": {
+    "ggml/src/ggml-metal/ggml-metal-device.m": "dfa3874f90ec40634dabf489b3fa70079d0054f75994a315114e4082ce124885",
+    "ggml/src/ggml-metal/ggml-metal-ops.cpp": "48540f5930990c6aa964aff5a2ce49f22591590d246f9c3c156376b181398ee1",
+    "ggml/src/ggml-metal/ggml-metal-pq2.m": "91c2d1b7af2746eb102a947b7d847c530e83e2d01eb56207775b180f3ebef57f",
+    "ggml/src/ggml-metal/ggml-metal-ops.h": "3bf433c9c351c29d111e78e4791e35bcdf84c250dd1874da1bf19e88e99b3494",
+    "ggml/src/ggml-metal/ggml-metal-context.m": "25a6369c1e3a7194d6cfa98b0dfae8edb7f66252fc142651dce1bdc3522a99bf",
+    "ggml/src/ggml-metal/ggml-metal-ane.h": "193ef3a859282dbcdfe19b5fe55abbda7d1a6dbd18efdfc59ee667e70e4e1e4e",
+    "ggml/src/ggml-metal/ggml-metal-pq2.h": "639577082fcd29d8bb9916a9c6a482b6ff3756b2911836171de1adc79d1ca449",
+    "ggml/src/ggml-metal/ggml-metal-device.cpp": "0a6caed85a1b87a484b2de6d3b0b8c4023816eaceb9d44cbf54376b38360256a",
+    "ggml/src/ggml-metal/ggml-metal.cpp": "6c1949997a89ba238b0acc127ef577755dc4b28b421c482446cd727d25e55c98",
+    "ggml/src/ggml-metal/ggml-metal-ane.m": "65fb15905c901ac41997918cbffb440f41ad262b6cc24013250ecd2da84d8b71",
+    "ggml/src/ggml-metal/kernels/dequantize.h": "54268693cb156a2e4c258ff62ee69db684f0c55b994d042d991463e9543312f2",
+    "ggml/src/ggml-metal/kernels/mul_mm.metal": "89b29c62c721de87e8f75b6d5c3e43734cd817eed7f850c18d37843bfefc17c4",
+    "ggml/src/ggml-metal/kernels/mul_mv.metal": "4172f54dbade037957c09efaeafd1b77ea81749924be1e8b979ae1e8b8c0cfdf",
+    "ggml/src/ggml-metal/CMakeLists.txt": "06d250cac9f0e390a7c16976d21341e330e74ae776cf1facda804659ad695915",
+    "src/llama-model.cpp": "28ed225d58d820f5d5fc40a7a6002068457afffcca581641d2cf9e460744355e",
+    "src/llama-model-loader.cpp": "746ddc4881b351c4cccbe0a21095b139a07b01fed86fb8059f1eb23960a92f1d",
+    "ane-kernel/generate.py": "525255a57611bfdac8cc43f1efa1c629dbcd4f4582c5de15bf13cf2ea87ae70f",
+    "ane-kernel/run.sh": "4adece63e75c34212d92b2046177d1f668caf8cd2266bd80b637f9c8f5b5e616",
+    "ane-kernel/build.sh": "ea9fb8dd9a8a1d2f6daa87b114ecea822bd228997ceccff42b2b1352c8e9c3e0"
+  },
+  "parameters": "-p 4096 -n 32 -b 4096 -ub 2048 -ngl 99 -fa on -r 3 -o json -v",
+  "profile": true,
+  "validation": false,
+  "interleaved": false
+}

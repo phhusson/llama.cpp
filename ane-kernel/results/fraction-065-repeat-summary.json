@@ -1,0 +1,53 @@
+{
+  "ane_fraction": 0.65,
+  "mps_enabled": true,
+  "ane_programs_loaded": [
+    "pq2_k5120_r6656_t2048",
+    "pq2_k5120_r3840_t2048",
+    "pq2_k6144_r3328_t2048",
+    "pq2_k5120_r11264_t2048",
+    "pq2_k17408_r3328_t2048",
+    "pq2_k5120_r7936_t2048"
+  ],
+  "ane_successful_requests": 2944,
+  "ane_failed_requests": 0,
+  "missing_kernels": 0,
+  "ane_matmuls": 2944,
+  "metal_only_mps_matmuls": 0,
+  "graphs": 8,
+  "benchmarks": [
+    {
+      "n_prompt": 4096,
+      "n_gen": 0,
+      "avg_ts": 115.67839,
+      "stddev_ts": 0.421559,
+      "samples_ts": [
+        115.3,
+        115.602,
+        116.133
+      ],
+      "samples_ns": [
+        35524635417,
+        35431922125,
+        35269926792
+      ]
+    },
+    {
+      "n_prompt": 0,
+      "n_gen": 32,
+      "avg_ts": 10.581192,
+      "stddev_ts": 0.011508,
+      "samples_ts": [
+        10.5859,
+        10.5681,
+        10.5896
+      ],
+      "samples_ns": [
+        3022895041,
+        3027986167,
+        3021828125
+      ]
+    }
+  ],
+  "provenance": "ane-kernel/results/fraction-065-repeat-provenance.json"
+}

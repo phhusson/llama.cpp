@@ -1,0 +1,62 @@
+{
+  "ggml/src/ggml-metal/ggml-metal-device.m": {
+    "added": 2,
+    "removed": 0
+  },
+  "ggml/src/ggml-metal/ggml-metal-ops.cpp": {
+    "added": 24,
+    "removed": 6
+  },
+  "ggml/src/ggml-metal/ggml-metal-pq2.m": {
+    "added": 199,
+    "removed": 0
+  },
+  "ggml/src/ggml-metal/ggml-metal-ops.h": {
+    "added": 1,
+    "removed": 1
+  },
+  "ggml/src/ggml-metal/ggml-metal-context.m": {
+    "added": 20,
+    "removed": 84
+  },
+  "ggml/src/ggml-metal/ggml-metal-ane.h": {
+    "added": 4,
+    "removed": 1
+  },
+  "ggml/src/ggml-metal/ggml-metal-pq2.h": {
+    "added": 17,
+    "removed": 0
+  },
+  "ggml/src/ggml-metal/ggml-metal-device.cpp": {
+    "added": 3,
+    "removed": 2
+  },
+  "ggml/src/ggml-metal/ggml-metal.cpp": {
+    "added": 11,
+    "removed": 1
+  },
+  "ggml/src/ggml-metal/ggml-metal-ane.m": {
+    "added": 152,
+    "removed": 7
+  },
+  "ggml/src/ggml-metal/kernels/dequantize.h": {
+    "added": 10,
+    "removed": 0
+  },
+  "ggml/src/ggml-metal/kernels/mul_mm.metal": {
+    "added": 21,
+    "removed": 4
+  },
+  "ggml/src/ggml-metal/kernels/mul_mv.metal": {
+    "added": 41,
+    "removed": 13
+  },
+  "ggml/src/ggml-metal/ggml-metal-coreml.m": {
+    "added": 0,
+    "removed": 348
+  },
+  "ggml/src/ggml-metal/ggml-metal-coreml.h": {
+    "added": 0,
+    "removed": 12
+  }
+}

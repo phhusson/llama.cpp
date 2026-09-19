@@ -1,0 +1,49 @@
+{
+  "fraction": 0.65,
+  "effective_rows": [
+    [
+      5120,
+      17408,
+      11264
+    ],
+    [
+      5120,
+      10240,
+      6656
+    ],
+    [
+      5120,
+      6144,
+      3840
+    ],
+    [
+      5120,
+      12288,
+      7936
+    ],
+    [
+      6144,
+      5120,
+      3328
+    ],
+    [
+      17408,
+      5120,
+      3328
+    ]
+  ],
+  "avg_ts": 115.252145,
+  "stddev_ts": 0.0,
+  "samples_ts": [
+    115.252
+  ],
+  "samples_ns": [
+    35539468708
+  ],
+  "ane_requests": 1472,
+  "json": "ane-kernel/results/fraction-coarse-06-f0.650000.json",
+  "log": "ane-kernel/results/fraction-coarse-06-f0.650000.log",
+  "selection": "Accepted by user; further sweep stopped",
+  "default_fraction": 0.65,
+  "repeat_confirmation": false
+}
