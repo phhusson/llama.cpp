@@ -1041,9 +1041,7 @@ kernel void kernel_mul_mv_ptq1_0_f32(
 // floors and four fmas per byte with no integer work. The select chain it replaces
 // spent two ands, two bool tests and two selects per element, none of which this ISA
 // can co-issue with the float adds. sumy is subtracted once for the -1 offset.
-template <typename block_t>
-inline float q2_dot_coeffs(device const block_t * qb, float sumy, thread const float * c, int il) {
-    device const uint8_t * qs = qb->qs + (il / 4);
+inline float q2_dot_bytes(device const uchar * qs, float d, float sumy, thread const float * c) {
 
     float acc = 0.f;
 
@@ -1056,11 +1054,16 @@ inline float q2_dot_coeffs(device const block_t * qb, float sumy, thread const f
         acc +=              b*c[4*j + 3];
     }
 
-    return qb->d * (acc - sumy);
+    return d * (acc - sumy);
 }
 
-template<int nr0, typename args_t>
-void kernel_mul_mv_pq2_0_f32_impl(
+template <typename block_t>
+inline float q2_dot_coeffs(device const block_t * qb, float sumy, thread const float * c, int il) {
+    return q2_dot_bytes(qb->qs + il/4, qb->d, sumy, c);
+}
+
+template<int nr0, typename args_t, bool planar = false>
+void kernel_mul_mv_pq2_0_f32_layout(
         args_t args,
         device const char * src0,
         device const char * src1,
@@ -1068,7 +1071,7 @@ void kernel_mul_mv_pq2_0_f32_impl(
         threadgroup  char * shmem,
         uint3  tgpig,
         ushort tiisg,
-        ushort sgitg) {
+        ushort sgitg, device const half * scales = nullptr) {
     const short NSG = FC_mul_mv_nsg;
 
     const int nb = args.ne00/QK_PQ2_0;
@@ -1099,7 +1102,7 @@ void kernel_mul_mv_pq2_0_f32_impl(
     const short ix = (tiisg/8);
     const short il = (tiisg%8)*16;
 
-    device const float * yb = y + ix*QK_PQ2_0 + il;
+    device const float * yb = y + ix*QK_PQ2_0 + (planar ? il/4 : il);
 
     for (int ib = ix; ib < nb; ib += N_SIMDWIDTH/8) {
         // stage the 16 activations once as base-4 collapse coefficients, reused per row;
@@ -1107,10 +1110,10 @@ void kernel_mul_mv_pq2_0_f32_impl(
         float sumy = 0.f;
 
         FOR_UNROLL (short j = 0; j < 4; j++) {
-            const float y0 = yb[4*j + 0];
-            const float y1 = yb[4*j + 1];
-            const float y2 = yb[4*j + 2];
-            const float y3 = yb[4*j + 3];
+            const float y0 = yb[planar ? j+0 : 4*j+0];
+            const float y1 = yb[planar ? j+32 : 4*j+1];
+            const float y2 = yb[planar ? j+64 : 4*j+2];
+            const float y3 = yb[planar ? j+96 : 4*j+3];
             sumy += (y0 + y1) + (y2 + y3);
             yl[4*j + 0] = y3 - 4.0f*y2;
             yl[4*j + 1] = y2 - 4.0f*y1;
@@ -1119,7 +1122,14 @@ void kernel_mul_mv_pq2_0_f32_impl(
         }
 
         FOR_UNROLL (short row = 0; row < nr0; row++) {
-            sumf[row] += q2_dot_coeffs(ax[row] + ib, sumy, yl, il);
+            if (planar) {
+                int row_index = min(first_row+row, args.ne01-1);
+                int ds = ((nb+31)/32)*32;
+                device const uchar * q = (device const uchar *)src0 + row_index*(args.ne00/4) + ib*32 + il/4;
+                sumf[row] += q2_dot_bytes(q, scales[row_index*ds+ib], sumy, yl);
+            } else {
+                sumf[row] += q2_dot_coeffs(ax[row] + ib, sumy, yl, il);
+            }
         }
 
         yb += QK_PQ2_0 * (N_SIMDWIDTH/8);
@@ -1136,6 +1146,13 @@ void kernel_mul_mv_pq2_0_f32_impl(
     }
 }
 
+template<int nr0, typename args_t>
+void kernel_mul_mv_pq2_0_f32_impl(
+        args_t args, device const char * src0, device const char * src1, device char * dst,
+        threadgroup char * shmem, uint3 tgpig, ushort tiisg, ushort sgitg) {
+    kernel_mul_mv_pq2_0_f32_layout<nr0, args_t>(args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
+}
+
 [[host_name("kernel_mul_mv_pq2_0_f32")]]
 kernel void kernel_mul_mv_pq2_0_f32(
         constant ggml_metal_kargs_mul_mv & args,
@@ -1146,6 +1163,17 @@ kernel void kernel_mul_mv_pq2_0_f32(
         ushort tiisg[[thread_index_in_simdgroup]],
         ushort sgitg[[simdgroup_index_in_threadgroup]]) {
     kernel_mul_mv_pq2_0_f32_impl<N_R0_PQ2_0, constant ggml_metal_kargs_mul_mv &>(args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg);
+}
+
+[[host_name("kernel_mul_mv_pq2_planar_f32")]]
+kernel void kernel_mul_mv_pq2_planar_f32(
+        constant ggml_metal_kargs_mul_mv & args,
+        device const char * src0, device const char * src1, device char * dst,
+        device const half * scales,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    kernel_mul_mv_pq2_0_f32_layout<N_R0_PQ2_0, constant ggml_metal_kargs_mul_mv &, true>(
+        args, src0, src1, dst, nullptr, tgpig, tiisg, sgitg, scales);
 }
 
 kernel void kernel_mul_mv_q4_0_f32(

@@ -161,6 +161,16 @@ void dequantize_pq2_0_t4(device const block_pq2_0 * xb, short il, thread type4 &
     reg = (type4) reg_f;
 }
 
+template <typename type4x4>
+void dequantize_pq2_planar(device const uchar * q, half d, short il, thread type4x4 & reg) {
+    float4x4 values;
+    for (short i = 0; i < 16; ++i) {
+        short j = il*16+i;
+        values[i/4][i%4] = (float((q[j%32] >> (2*(j/32))) & 3)-1.0f)*float(d);
+    }
+    reg = (type4x4)values;
+}
+
 // PTQ1_0: one lookup replaces the base-3 arithmetic. Entry b holds the five trits of
 // byte b packed two bits each, low trit first, as 0/1/2 (subtract 1 for the value).
 // Generated from, and verified against, the reference decode ((b*3^n & 0xFF)*3)>>8 for

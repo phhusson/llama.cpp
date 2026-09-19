@@ -1,4 +1,5 @@
 #import "ggml-metal-device.h"
+#import "ggml-metal-pq2.h"
 
 #import "ggml-impl.h"
 #import "ggml-backend-impl.h"
@@ -2339,6 +2340,7 @@ void ggml_metal_buffer_clear(ggml_metal_buffer_t buf, uint8_t value) {
 }
 
 struct ggml_metal_buffer_id ggml_metal_buffer_get_id(ggml_metal_buffer_t buf, const struct ggml_tensor * t) {
+    if (ggml_metal_pq2_is_planar(t)) { return ggml_metal_pq2_buffer(t, false); }
     struct ggml_metal_buffer_id res = { nil, 0 };
 
     const int64_t tsize = ggml_nbytes(t);

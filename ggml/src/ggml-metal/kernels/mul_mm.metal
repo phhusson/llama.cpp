@@ -14,12 +14,13 @@ template<
     typename SA, typename SA_4x4, typename SA_8x8,
     typename SB, typename SB_2x4, typename SB_8x8,
     typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread SA_4x4 &),
-    typename T0, typename T0_4x4, typename T1, typename T1_2x4>
+    typename T0, typename T0_4x4, typename T1, typename T1_2x4, bool planar = false>
 kernel void kernel_mul_mm(
         constant ggml_metal_kargs_mul_mm & args,
         device const char * srcA,
         device const char * srcB,
         device       char * dst,
+        device const half * scales,
         threadgroup  char * shmem [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiitg [[thread_index_in_threadgroup]],
@@ -102,7 +103,14 @@ kernel void kernel_mul_mm(
                     device const block_q * row_ptr = (device const block_q *)(srcA + args.nb01 * (ra + row) + offset0);
 
                     SA_4x4 temp_a;
-                    dequantize_func(row_ptr + block_idx, il, temp_a);
+                    if (planar) {
+                        int row_index = ra + row;
+                        int ds = ((K/128+31)/32)*32;
+                        dequantize_pq2_planar((device const uchar *)srcA + row_index*(K/4)+block_idx*32,
+                            scales[row_index*ds+block_idx], il, temp_a);
+                    } else {
+                        dequantize_func(row_ptr + block_idx, il, temp_a);
+                    }
 
                     FOR_UNROLL (short i = 0; i < 16; i++) {
                         // Zero-pad A for K positions beyond valid range (handles partial K iterations)
@@ -146,12 +154,13 @@ template<
     typename S0, typename S0_4x4, typename S0_8x8,
     typename S1, typename S1_2x4, typename S1_8x8,
     typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &),
-    typename T0, typename T0_4x4, typename T1, typename T1_2x4>
+    typename T0, typename T0_4x4, typename T1, typename T1_2x4, bool planar = false>
 kernel void kernel_mul_mm(
         constant ggml_metal_kargs_mul_mm & args,
         device const char * src0,
         device const char * src1,
         device       char * dst,
+        device const half * scales,
         threadgroup  char * shmem [[threadgroup(0)]],
         uint3  tgpig[[threadgroup_position_in_grid]],
         ushort tiitg[[thread_index_in_threadgroup]],
@@ -229,7 +238,14 @@ kernel void kernel_mul_mm(
             }
         } else {
             S0_4x4 temp_a;
-            dequantize_func(x, il, temp_a);
+            if (planar) {
+                int row_index = r0+lr0, block_idx = loop_k/128;
+                int ds = ((args.ne00/128+31)/32)*32;
+                dequantize_pq2_planar((device const uchar *)src0 + row_index*(args.ne00/4)+block_idx*32,
+                    scales[row_index*ds+block_idx], il, temp_a);
+            } else {
+                dequantize_func(x, il, temp_a);
+            }
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -744,6 +760,7 @@ template [[host_name("kernel_mul_mm_bf16_f32")]]    kernel mul_mm_t kernel_mul_m
 template [[host_name("kernel_mul_mm_q1_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q1_0,    8,     dequantize_q1_0,    float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q2_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_0,    4,     dequantize_q2_0,    float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_pq2_0_f32")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_pq2_0,   8,     dequantize_pq2_0,   float,  float4x4,  float, float2x4>;
+template [[host_name("kernel_mul_mm_pq2_planar_f32")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_pq2_0,   8,     dequantize_pq2_0,   float,  float4x4,  float, float2x4, true>;
 template [[host_name("kernel_mul_mm_ptq1_0_f32")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_ptq1_0,   8,     dequantize_ptq1_0,   float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q4_0_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_0,    2,     dequantize_q4_0,    float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q4_1_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q4_1,    2,     dequantize_q4_1,    float,  float4x4,  float, float2x4>;

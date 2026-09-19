@@ -6,6 +6,7 @@
 #include "ggml-metal-device.h"
 #include "ggml-metal-context.h"
 #include "ggml-metal-ops.h"
+#include "ggml-metal-pq2.h"
 #include "ggml-metal-tuning.h"
 
 #include <mutex>
@@ -685,7 +686,7 @@ static void ggml_backend_metal_device_get_props(ggml_backend_dev_t dev, ggml_bac
     props->caps = {
         /* .async                = */ true,
         /* .host_buffer          = */ false,
-        /* .buffer_from_host_ptr = */ true,
+        /* .buffer_from_host_ptr = */ ggml_metal_pq2_planar_buffer_type(dev) == nullptr,
         /* .events               = */ true,
         /* .mmap_support         = */ true,
     };
@@ -737,12 +738,18 @@ static ggml_backend_buffer_t ggml_backend_metal_device_buffer_mapped(ggml_backen
 static bool ggml_backend_metal_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
 
+    for (const auto * src : op->src) {
+        if (src && ggml_metal_buffer_is_pq2_planar(src->buffer)) {
+            return src == op->src[0] && ggml_metal_pq2_supports_op(op);
+        }
+    }
     return ggml_metal_device_supports_op(ctx_dev, op);
 }
 
 static bool ggml_backend_metal_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     return
         buft->device == dev && (
+        buft == ggml_metal_pq2_planar_buffer_type(dev) ||
         buft->iface.get_name == ggml_backend_metal_buffer_type_shared_get_name ||
         buft->iface.get_name == ggml_backend_metal_buffer_type_private_get_name ||
         buft->iface.get_name == ggml_backend_metal_buffer_type_mapped_get_name);
@@ -902,7 +909,14 @@ static const char * ggml_backend_metal_tuning_device_token(ggml_backend_dev_t de
     return ggml_metal_device_id_token(ggml_metal_device_get_props(ctx_dev)->device_id);
 }
 
+static ggml_backend_buffer_type_t ggml_backend_metal_device_get_alt_type(ggml_backend_dev_t dev, enum ggml_type type) {
+    return type == GGML_TYPE_PQ2_0 ? ggml_metal_pq2_planar_buffer_type(dev) : NULL;
+}
+
 static void * ggml_backend_metal_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    if (strcmp(name, "ggml_backend_dev_get_alt_type") == 0) {
+        return (void *)ggml_backend_metal_device_get_alt_type;
+    }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_metal_get_features;
     }

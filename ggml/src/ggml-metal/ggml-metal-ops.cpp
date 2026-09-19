@@ -1,3 +1,4 @@
+#include "ggml-metal-pq2.h"
 #include <cstdlib>
 #include "ggml-metal-ops.h"
 
@@ -2790,7 +2791,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
 
     // first try to use small-batch mat-mv kernels
     // these should be efficient for BS [2, ~8]
-    if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
+    if (!ggml_metal_pq2_is_planar(op->src[0]) && op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
         (
          (
           (
@@ -2890,6 +2891,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+        if (ggml_metal_pq2_is_planar(op->src[0])) {
+            ggml_metal_encoder_set_buffer(enc, ggml_metal_pq2_buffer(op->src[0], true), 4);
+        }
 
         ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + r0ptg - 1)/r0ptg), ((ne11 + r1ptg - 1)/r1ptg), ne12*ne13, 32, nsg, 1);
     } else if (
@@ -2933,6 +2937,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+        if (ggml_metal_pq2_is_planar(op->src[0])) {
+            ggml_metal_encoder_set_buffer(enc, ggml_metal_pq2_buffer(op->src[0], true), 4);
+        }
 
         const size_t smem = pipeline.smem;
 
@@ -2979,6 +2986,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 2);
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         3);
+        if (ggml_metal_pq2_is_planar(op->src[0])) {
+            ggml_metal_encoder_set_buffer(enc, ggml_metal_pq2_buffer(op->src[0], true), 4);
+        }
 
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
