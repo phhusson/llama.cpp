@@ -29,6 +29,37 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     return ggml_metal_buffer_get_id(ctx, t);
 }
 
+void ggml_metal_op_mul_mat_rows(ggml_metal_device_t dev, ggml_metal_cmd_buf_t cmd_buf, const ggml_tensor * op, int64_t first, int64_t rows) {
+    const auto * w = op->src[0];
+    const auto * a = op->src[1];
+    auto pipeline = ggml_metal_library_get_pipeline_mul_mm(ggml_metal_device_get_library(dev), op);
+    GGML_ASSERT(rows > 0 && rows % pipeline.nr0 == 0 && first+rows <= op->ne[0]);
+    ggml_metal_kargs_mul_mm args = {
+        (int32_t) w->ne[0], (int32_t) w->ne[2], w->nb[1], w->nb[2], w->nb[3], (int32_t) a->ne[2],
+        a->nb[0], a->nb[1], a->nb[2], a->nb[3], (int32_t) op->ne[0], (int32_t) op->ne[1], 1, 1,
+    };
+    auto enc = ggml_metal_encoder_init(cmd_buf, false);
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes(enc, &args, sizeof(args), 0);
+    auto qw = ggml_metal_get_buffer_id(w), dst = ggml_metal_get_buffer_id(op);
+    qw.offs += first*(ggml_metal_pq2_is_planar(w) ? w->ne[0]/4 : w->nb[1]);
+    dst.offs += first*sizeof(float);
+    ggml_metal_encoder_set_buffer(enc, qw, 1);
+    ggml_metal_encoder_set_buffer(enc, ggml_metal_get_buffer_id(a), 2);
+    ggml_metal_encoder_set_buffer(enc, dst, 3);
+    if (ggml_metal_pq2_is_planar(w)) {
+        auto d = ggml_metal_pq2_buffer(w, true);
+        d.offs += first*((w->ne[0]/128+31)/32)*64;
+        ggml_metal_encoder_set_buffer(enc, d, 4);
+    }
+    ggml_metal_encoder_set_threadgroup_memory_size(enc, pipeline.smem, 0);
+    // Keep the full output stride while dispatching the selected rows.
+    ggml_metal_encoder_dispatch_threadgroups(enc, (a->ne[1] + pipeline.nr1 - 1) / pipeline.nr1,
+                                            rows / pipeline.nr0, 1, 32, pipeline.nsg, 1);
+    ggml_metal_encoder_end_encoding(enc);
+    ggml_metal_encoder_free(enc);
+}
+
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,

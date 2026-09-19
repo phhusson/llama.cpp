@@ -102,6 +102,11 @@ else()
     set(GGML_BLAS_VENDOR_DEFAULT "Generic")
 endif()
 
+set(GGML_METAL_ANE_DEFAULT OFF)
+if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" AND NOT CMAKE_CROSSCOMPILING)
+    set(GGML_METAL_ANE_DEFAULT ON)
+endif()
+
 if (CMAKE_CROSSCOMPILING OR DEFINED ENV{SOURCE_DATE_EPOCH})
     message(STATUS "Setting GGML_NATIVE_DEFAULT to OFF")
     set(GGML_NATIVE_DEFAULT OFF)
@@ -241,6 +246,8 @@ option(GGML_METAL                           "ggml: use Metal"                   
 option(GGML_METAL_NDEBUG                    "ggml: disable Metal debugging"                   OFF)
 option(GGML_METAL_SHADER_DEBUG              "ggml: compile Metal with -fno-fast-math"         OFF)
 option(GGML_METAL_EMBED_LIBRARY             "ggml: embed Metal library"                       ${GGML_METAL})
+option(GGML_METAL_ANE                       "ggml: generate and embed ANE PQ2 kernels"        ${GGML_METAL_ANE_DEFAULT})
+set   (GGML_METAL_ANE_FRACTION "0.65" CACHE STRING "ggml: ANE row fraction for embedded PQ2 kernels")
 set   (GGML_METAL_MACOSX_VERSION_MIN "" CACHE STRING
                                             "ggml: metal minimum macOS version")
 set   (GGML_METAL_STD "" CACHE STRING       "ggml: metal standard version (-std flag)")

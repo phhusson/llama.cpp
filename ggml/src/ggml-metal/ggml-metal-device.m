@@ -125,7 +125,8 @@ int ggml_metal_pipeline_max_theads_per_threadgroup(struct ggml_metal_pipeline_wi
     X(UPSCALE,         upscale)        \
     X(ARGSORT,         argsort)        \
     X(POOL,            pool)           \
-    X(MISC,            misc)
+    X(MISC,            misc)           \
+    X(ANE,             ane)
 
 enum ggml_metal_lib_kind {
 #define X(e, s) GGML_METAL_LIB_##e,
@@ -804,6 +805,10 @@ void ggml_metal_encoder_set_threadgroup_memory_size(ggml_metal_encoder_t encoder
 
 void ggml_metal_encoder_dispatch_threadgroups(ggml_metal_encoder_t encoder, int tg0, int tg1, int tg2, int tptg0, int tptg1, int tptg2) {
     [encoder->obj dispatchThreadgroups:MTLSizeMake(tg0, tg1, tg2) threadsPerThreadgroup:MTLSizeMake(tptg0, tptg1, tptg2)];
+}
+
+void ggml_metal_encoder_dispatch_threads(ggml_metal_encoder_t encoder, int n0, int n1, int n2, int tptg0, int tptg1, int tptg2) {
+    [encoder->obj dispatchThreads:MTLSizeMake(n0, n1, n2) threadsPerThreadgroup:MTLSizeMake(tptg0, tptg1, tptg2)];
 }
 
 void ggml_metal_encoder_memory_barrier(ggml_metal_encoder_t encoder) {

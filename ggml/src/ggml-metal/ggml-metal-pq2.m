@@ -1,4 +1,5 @@
 #import "ggml-metal-pq2.h"
+#import "ggml-metal-ane.h"
 #import "ggml-backend-impl.h"
 #import "ggml-impl.h"
 #import <Foundation/Foundation.h>
@@ -170,7 +171,7 @@ static ggml_backend_buffer_t pq2_alloc(ggml_backend_buffer_type_t buft, size_t s
 }
 
 ggml_backend_buffer_type_t ggml_metal_pq2_planar_buffer_type(ggml_backend_dev_t dev) {
-    if (!getenv("GGML_METAL_ANE_PLANAR")) { return NULL; }
+    if (!getenv("GGML_METAL_ANE_PLANAR") && !ggml_metal_ane_enabled()) { return NULL; }
     static struct ggml_backend_buffer_type types[16];
     int index = ggml_metal_device_get_props(dev->context)->device;
     GGML_ASSERT(index >= 0 && index < 16);

@@ -26,6 +26,8 @@ int ggml_metal_op_n_nodes(ggml_metal_op_t ctx);
 
 int ggml_metal_op_encode(ggml_metal_op_t ctx, int idx);
 
+void ggml_metal_op_mul_mat_rows(ggml_metal_device_t dev, ggml_metal_cmd_buf_t cmd_buf, const struct ggml_tensor * op, int64_t first, int64_t rows);
+
 //
 // available ops:
 //

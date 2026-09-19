@@ -11,6 +11,7 @@ ggml_add_backend_library(ggml-metal
                          ggml-metal-device.cpp
                          ggml-metal-common.cpp
                          ggml-metal-context.m
+                         ggml-metal-ane.m
                          ggml-metal-pq2.m
                          ggml-metal-ops.cpp
                          ggml-metal-tuning.cpp
@@ -22,6 +23,46 @@ target_link_libraries(ggml-metal PRIVATE
                       ${METALKIT_FRAMEWORK}
                       ${IOSURFACE_FRAMEWORK}
                       )
+
+if (GGML_METAL_ANE)
+    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        message(FATAL_ERROR "ANE kernel generation requires an Apple Silicon macOS host. Configure with -DGGML_METAL_ANE=OFF on other hosts.")
+    endif()
+    find_package(Python3 3.12 EXACT COMPONENTS Interpreter QUIET)
+    if (NOT Python3_Interpreter_FOUND)
+        message(FATAL_ERROR "ANE kernel generation requires Python 3.12. Install it or configure with -DGGML_METAL_ANE=OFF.")
+    endif()
+
+    get_filename_component(ANE_KERNEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../ane-kernel" ABSOLUTE)
+    set(ANE_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/ane-kernel")
+    set(ANE_PYTHON "${ANE_BUILD_DIR}/venv/bin/python")
+    set(ANE_READY "${ANE_BUILD_DIR}/venv/ready")
+    set(ANE_HEADER "${ANE_BUILD_DIR}/ggml-metal-ane-data.h")
+    file(GENERATE OUTPUT "${ANE_BUILD_DIR}/fraction.txt" CONTENT "${GGML_METAL_ANE_FRACTION}\n")
+
+    add_custom_command(
+        OUTPUT "${ANE_READY}"
+        COMMAND "${Python3_EXECUTABLE}" -m venv "${ANE_BUILD_DIR}/venv"
+        COMMAND "${ANE_PYTHON}" -m pip --disable-pip-version-check install -r "${ANE_KERNEL_DIR}/requirements.txt"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${ANE_READY}"
+        DEPENDS "${ANE_KERNEL_DIR}/requirements.txt"
+        COMMENT "Install ANE generator dependencies in the build directory"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${ANE_HEADER}"
+        COMMAND "${ANE_PYTHON}" "${ANE_KERNEL_DIR}/embed.py"
+                --output "${ANE_HEADER}" --models "${ANE_BUILD_DIR}/models"
+                --fraction "${GGML_METAL_ANE_FRACTION}"
+        DEPENDS "${ANE_READY}" "${ANE_BUILD_DIR}/fraction.txt"
+                "${ANE_KERNEL_DIR}/generate.py" "${ANE_KERNEL_DIR}/embed.py"
+        COMMENT "Generate and embed ANE PQ2 kernels (fraction ${GGML_METAL_ANE_FRACTION})"
+        VERBATIM
+    )
+    target_sources(ggml-metal PRIVATE "${ANE_HEADER}")
+    target_include_directories(ggml-metal PRIVATE "${ANE_BUILD_DIR}")
+    target_compile_definitions(ggml-metal PRIVATE GGML_METAL_ANE)
+endif()
 
 if (GGML_METAL_NDEBUG)
     add_compile_definitions(GGML_METAL_NDEBUG)
@@ -53,6 +94,7 @@ set(METALLIB_KERNEL_SOURCES
     kernels/argsort.metal
     kernels/pool.metal
     kernels/misc.metal
+    kernels/ane.metal
 )
 
 if (GGML_METAL_EMBED_LIBRARY)
