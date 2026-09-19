@@ -1,0 +1,5 @@
+/models/
+/results/*.log
+/results/*.logits.f32
+/results/*.tokens.i32
+/results/*.stdout
