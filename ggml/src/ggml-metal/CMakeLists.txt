@@ -1,6 +1,7 @@
 find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
 find_library(METAL_FRAMEWORK    Metal      REQUIRED)
 find_library(METALKIT_FRAMEWORK MetalKit   REQUIRED)
+find_library(MPS_FRAMEWORK MetalPerformanceShaders REQUIRED)
 find_library(IOSURFACE_FRAMEWORK IOSurface REQUIRED)
 
 message(STATUS "Metal framework found")
@@ -21,6 +22,7 @@ target_link_libraries(ggml-metal PRIVATE
                       ${FOUNDATION_LIBRARY}
                       ${METAL_FRAMEWORK}
                       ${METALKIT_FRAMEWORK}
+                      ${MPS_FRAMEWORK}
                       ${IOSURFACE_FRAMEWORK}
                       )
 

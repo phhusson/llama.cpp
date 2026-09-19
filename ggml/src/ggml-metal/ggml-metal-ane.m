@@ -1,5 +1,6 @@
 #import "ggml-metal-ane.h"
 #import "ggml-metal-pq2.h"
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include <math.h>
 #import "ggml-impl.h"
 #import "ggml-backend-impl.h"
@@ -83,6 +84,9 @@ struct ggml_ane {
     uint64_t sequence;
     bool profile;
     double fraction;
+    NSMutableDictionary * mps_ops;
+    struct ggml_metal_pipeline_with_params expand;
+    id<MTLBuffer> scratch_w, scratch_a;
 };
 
 static NSString * ane_key(const struct ggml_tensor * op, int64_t rows) {
@@ -121,6 +125,7 @@ void * ggml_metal_ane_init(void) {
     ctx->credits = dispatch_semaphore_create(8);
     ctx->profile = getenv("GGML_METAL_ANE_PROFILE") != NULL;
     ctx->fraction = getenv("GGML_METAL_ANE_FRACTION") ? atof(getenv("GGML_METAL_ANE_FRACTION")) : GGML_METAL_ANE_DEFAULT_FRACTION;
+    ctx->mps_ops = [NSMutableDictionary new];
     atomic_init(&ctx->failed, false);
     return ctx;
 }
@@ -131,6 +136,8 @@ void ggml_metal_ane_free(void * opaque) {
     ggml_metal_ane_finish(ctx);
     [ctx->requests release]; [ctx->programs release];
     [ctx->input_ready release]; [ctx->output_ready release];
+    [ctx->mps_ops release];
+    [ctx->scratch_w release]; [ctx->scratch_a release];
     dispatch_release(ctx->pending); dispatch_release(ctx->credits);
     free(ctx);
 }
@@ -142,6 +149,11 @@ static bool ane_supports_op(const struct ggml_tensor * op) {
         op->ne[0] % 64 == 0 && op->ne[0] >= 2048 && op->ne[0] <= 32768 &&
         op->src[0]->ne[2] == 1 && op->src[0]->ne[3] == 1 && op->ne[2] == 1 && op->ne[3] == 1 &&
         ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]) && ggml_is_contiguous(op);
+}
+
+bool ggml_metal_ane_mps_only(void * opaque, const struct ggml_tensor * op) {
+    struct ggml_ane * ctx = opaque;
+    return ctx && ctx->fraction == 0 && !getenv("GGML_METAL_ANE_MPS_DISABLE") && ane_supports_op(op);
 }
 
 int64_t ggml_metal_ane_rows(void * opaque, const struct ggml_tensor * op) {
@@ -383,4 +395,62 @@ void ggml_metal_ane_check(void * opaque, const struct ggml_tensor * op, int64_t 
         GGML_LOG_INFO("ANE PQ2 check %s %s: relative RMS %.5g, max error %.5g, max ref %.5g\n", op->name, part ? "ANE" : "Metal", rel, maxe, maxr);
         GGML_ASSERT(rel < .02 && maxe < .04*maxr + .001);
     }
+}
+
+bool ggml_metal_ane_mps(void * opaque, ggml_metal_device_t dev, ggml_metal_cmd_buf_t cb_raw, const struct ggml_tensor * op, int64_t rows) {
+    struct ggml_ane * ctx = opaque;
+    if (getenv("GGML_METAL_ANE_MPS_DISABLE")) { return false; }
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandBuffer> cb = cb_raw;
+    if (!ctx->expand.pipeline) {
+        ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+        ctx->expand = ggml_metal_library_compile_pipeline(lib, "kernel_pq2_planar_expand", "kernel_pq2_planar_expand", NULL);
+        GGML_ASSERT(ctx->expand.pipeline && ctx->cast.pipeline);
+    }
+    const int64_t k = op->src[0]->ne[0], t = op->ne[1];
+    const int64_t first = op->ne[0]-rows;
+    size_t nw = rows*k*2, na = t*k*2;
+    if (ctx->scratch_w.length < nw) {
+        [ctx->scratch_w release];
+        ctx->scratch_w = [device newBufferWithLength:nw options:MTLResourceStorageModePrivate];
+    }
+    if (ctx->scratch_a.length < na) {
+        [ctx->scratch_a release];
+        ctx->scratch_a = [device newBufferWithLength:na options:MTLResourceStorageModePrivate];
+    }
+    GGML_ASSERT(ctx->scratch_w && ctx->scratch_a);
+    struct ggml_metal_buffer_id w = ane_buffer(op->src[0]), a = ane_buffer(op->src[1]), y = ane_buffer(op);
+    ggml_metal_encoder_t enc = ggml_metal_encoder_init(cb, false);
+    ggml_metal_encoder_set_pipeline(enc, ctx->expand);
+    w.offs += first*(k/4);
+    ggml_metal_encoder_set_buffer(enc, w, 0);
+    ggml_metal_encoder_set_buffer(enc, (struct ggml_metal_buffer_id){ctx->scratch_w, 0}, 1);
+    struct ggml_metal_buffer_id d = ggml_metal_pq2_buffer(op->src[0], true);
+    uint32_t shape[] = {(uint32_t)k, (uint32_t)((k/128+31)/32*32)};
+    d.offs += first*shape[1]*2;
+    ggml_metal_encoder_set_buffer(enc, d, 2);
+    ggml_metal_encoder_set_bytes(enc, shape, sizeof(shape), 3);
+    ggml_metal_encoder_dispatch_threads(enc, rows*k/4, 1, 1, 256, 1, 1);
+    ggml_metal_encoder_set_pipeline(enc, ctx->cast);
+    ggml_metal_encoder_set_buffer(enc, a, 0);
+    ggml_metal_encoder_set_buffer(enc, (struct ggml_metal_buffer_id){ctx->scratch_a, 0}, 1);
+    ggml_metal_encoder_dispatch_threads(enc, t*k/4, 1, 1, 256, 1, 1);
+    ggml_metal_encoder_end_encoding(enc);
+    ggml_metal_encoder_free(enc);
+    NSString * key = [NSString stringWithFormat:@"%lld_%lld_%lld", k, rows, t];
+    MPSMatrixMultiplication * mm = ctx->mps_ops[key];
+    if (!mm) {
+        mm = [[[MPSMatrixMultiplication alloc] initWithDevice:device transposeLeft:NO transposeRight:YES
+            resultRows:t resultColumns:rows interiorColumns:k alpha:1 beta:0] autorelease];
+        ctx->mps_ops[key] = mm;
+    }
+    MPSMatrix * mw = [[[MPSMatrix alloc] initWithBuffer:ctx->scratch_w descriptor:
+        [MPSMatrixDescriptor matrixDescriptorWithRows:rows columns:k rowBytes:k*2 dataType:MPSDataTypeFloat16]] autorelease];
+    MPSMatrix * ma = [[[MPSMatrix alloc] initWithBuffer:ctx->scratch_a descriptor:
+        [MPSMatrixDescriptor matrixDescriptorWithRows:t columns:k rowBytes:k*2 dataType:MPSDataTypeFloat16]] autorelease];
+    MPSMatrix * my = [[[MPSMatrix alloc] initWithBuffer:y.metal offset:y.offs+first*4 descriptor:
+        [MPSMatrixDescriptor matrixDescriptorWithRows:t columns:rows rowBytes:op->nb[1] dataType:MPSDataTypeFloat32]] autorelease];
+    [mm encodeToCommandBuffer:cb leftMatrix:ma rightMatrix:mw resultMatrix:my];
+    if (rows == op->ne[0]) { ane_watch(ctx, cb, false); }
+    return true;
 }

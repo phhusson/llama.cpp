@@ -477,28 +477,28 @@ static enum ggml_status ggml_metal_ane_graph(ggml_metal_t ctx, struct ggml_cgrap
         if (!ggml_metal_ane_begin(ane, ctx->dev)) { ctx->has_error = true; return GGML_STATUS_FAILED; }
         id<MTLCommandQueue> queue = ggml_metal_device_get_queue(ctx->dev);
         enum ggml_status status = GGML_STATUS_SUCCESS;
-        int begin = 0, splits = 0;
+        int begin = 0, splits = 0, mps_only = 0;
         int64_t start = ggml_time_us();
         for (int i = 0; i < gf->n_nodes; ++i) {
             struct ggml_tensor * op = gf->nodes[i];
             int64_t rows = ggml_metal_ane_rows(ctx->ane, op);
-            if (!rows) { continue; }
+            if (!rows && !ggml_metal_ane_mps_only(ane, op)) { continue; }
             @autoreleasepool {
                 if (ctx->abort_callback && ctx->abort_callback(ctx->abort_callback_data)) { status = GGML_STATUS_ABORTED; break; }
                 id<MTLCommandBuffer> preceding = [queue commandBuffer];
                 preceding.label = [NSString stringWithFormat:@"ANE inputs %s", op->name];
                 if ((begin < i && !ggml_metal_ane_encode_range(ctx, preceding, gf, begin, i)) ||
-                    !ggml_metal_ane_prepare(ane, ctx->dev, preceding, op, rows)) {
+                    (rows && !ggml_metal_ane_prepare(ane, ctx->dev, preceding, op, rows))) {
                     status = GGML_STATUS_FAILED; break;
                 }
                 [preceding commit];
-                bool submitted = ggml_metal_ane_submit(ane, op, rows);
+                bool submitted = !rows || ggml_metal_ane_submit(ane, op, rows);
                 id<MTLCommandBuffer> metal = [queue commandBuffer];
                 metal.label = [NSString stringWithFormat:@"Metal and ANE join %s", op->name];
-                if (rows < op->ne[0]) {
+                if (rows < op->ne[0] && !ggml_metal_ane_mps(ctx->ane, ctx->dev, metal, op, op->ne[0]-rows)) {
                     ggml_metal_op_mul_mat_rows(ctx->dev, metal, op, rows, op->ne[0]-rows);
                 }
-                ggml_metal_ane_join(ane, ctx->dev, metal, op, rows);
+                if (rows) { ggml_metal_ane_join(ane, ctx->dev, metal, op, rows); }
                 [metal commit];
                 if (!submitted) { status = GGML_STATUS_FAILED; break; }
                 if (getenv("GGML_METAL_ANE_VALIDATE")) {
@@ -506,7 +506,7 @@ static enum ggml_status ggml_metal_ane_graph(ggml_metal_t ctx, struct ggml_cgrap
                     ggml_metal_ane_check(ctx->ane, op, rows);
                 }
                 begin = i+1;
-                ++splits;
+                if (rows) { ++splits; } else { ++mps_only; }
             }
         }
         if (status == GGML_STATUS_SUCCESS && begin < gf->n_nodes) {
@@ -522,7 +522,7 @@ static enum ggml_status ggml_metal_ane_graph(ggml_metal_t ctx, struct ggml_cgrap
         if (!ggml_metal_ane_finish(ane)) { status = GGML_STATUS_FAILED; }
         if (status == GGML_STATUS_FAILED) { ctx->has_error = true; }
         if (getenv("GGML_METAL_ANE_PROFILE")) {
-            GGML_LOG_INFO("ANE events graph: %d matmuls, %.3f ms\n", splits, (ggml_time_us()-start)/1000.0);
+            GGML_LOG_INFO("ANE events graph: %d matmuls, %d Metal-only MPS matmuls, %.3f ms\n", splits, mps_only, (ggml_time_us()-start)/1000.0);
         }
         return status;
     }
@@ -536,7 +536,7 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
     if (ctx->ane) {
         for (int i = 0; i < gf->n_nodes; ++i) {
-            if (ggml_metal_ane_rows(ctx->ane, gf->nodes[i])) {
+            if (ggml_metal_ane_rows(ctx->ane, gf->nodes[i]) || ggml_metal_ane_mps_only(ctx->ane, gf->nodes[i])) {
                 return ggml_metal_ane_graph(ctx, gf, ctx->ane);
             }
         }
