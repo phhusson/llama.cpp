@@ -1067,6 +1067,15 @@ static ggml_backend_buffer_type_t select_weight_buft(const llama_hparams & hpara
     for (const auto & cur : *buft_list) {
         ggml_backend_dev_t cur_dev = cur.first;
         ggml_backend_buffer_type_t cur_buft = cur.second;
+        if (op != GGML_OP_NONE && cur_buft == ggml_backend_dev_buffer_type(cur_dev)) {
+            auto reg = ggml_backend_dev_backend_reg(cur_dev);
+            auto preferred = (ggml_backend_dev_get_alt_type_t)
+                ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_alt_type");
+            if (preferred) {
+                auto buft = preferred(cur_dev, tensor->type);
+                if (buft && weight_buft_supported(hparams, tensor, op, buft, cur_dev)) { return buft; }
+            }
+        }
         if (weight_buft_supported(hparams, tensor, op, cur_buft, cur_dev)) {
             return cur_buft;
         }

@@ -1986,6 +1986,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
 
             ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(weight->buffer);
+            // Generated F32 rotations use normal storage, including with repacked weights.
+            if (auto dev = ggml_backend_buft_get_device(buft)) { buft = ggml_backend_dev_buffer_type(dev); }
             if (target == &hadamard_rotations) {
                 preferred_buft = buft;
             } else if (preferred_buft) {
