@@ -44,6 +44,244 @@ static xrt::bo & ggml_vk_npu_import(const vk_buffer & buffer, xrt::device & devi
     return *buffer->npu_bo;
 }
 
+// -1 = untested, 0 = driver ignores incoming fences, 1 = driver waits for them.
+static int g_npu_incoming_fence = -1;
+static bool g_npu_incoming_fence_tested = false;
+
+static bool ggml_vk_npu_incoming_fence_broken() {
+    return g_npu_incoming_fence == 0;
+}
+
+// Blocks until the exported SYNC_FD fence signals. Used only when the driver
+// ignores incoming fences and the NPU must not start before Vulkan finishes.
+static void ggml_vk_npu_wait_sync_fd(int fd) {
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    while (poll(&pfd, 1, -1) < 0) {
+        if (errno != EINTR) {
+            throw std::system_error(errno, std::generic_category(), "NPU: wait for Vulkan release fence");
+        }
+    }
+}
+
+// Self-contained Vulkan event gate, ported from experiments/fences/check_fences.cpp.
+// Owns its own instance and device so it cannot stall the backend queue.
+struct ggml_vk_npu_gate {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue queue = VK_NULL_HANDLE;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkEvent event = VK_NULL_HANDLE;
+    VkSemaphore ready = VK_NULL_HANDLE;
+    PFN_vkGetSemaphoreFdKHR get_fd = nullptr;
+
+    bool create() {
+        VkApplicationInfo app{};
+        app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+        app.apiVersion = VK_API_VERSION_1_2;
+        VkInstanceCreateInfo instance_info{};
+        instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        instance_info.pApplicationInfo = &app;
+        if (vkCreateInstance(&instance_info, nullptr, &instance) != VK_SUCCESS) return false;
+
+        uint32_t count = 0;
+        if (vkEnumeratePhysicalDevices(instance, &count, nullptr) != VK_SUCCESS || count == 0) return false;
+        std::vector<VkPhysicalDevice> devices(count);
+        if (vkEnumeratePhysicalDevices(instance, &count, devices.data()) != VK_SUCCESS) return false;
+        VkPhysicalDevice physical = VK_NULL_HANDLE;
+        for (auto candidate : devices) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(candidate, &props);
+            if (props.vendorID == 0x1002) { physical = candidate; break; }
+        }
+        if (!physical) return false;
+
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+        std::vector<VkQueueFamilyProperties> families(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
+        uint32_t family = 0;
+        while (family < count && !(families[family].queueFlags & VK_QUEUE_COMPUTE_BIT)) ++family;
+        if (family >= count) return false;
+
+        float priority = 1;
+        VkDeviceQueueCreateInfo queue_info{};
+        queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queue_info.queueFamilyIndex = family;
+        queue_info.queueCount = 1;
+        queue_info.pQueuePriorities = &priority;
+        const char * extensions[] = {"VK_KHR_external_semaphore_fd"};
+        VkDeviceCreateInfo device_info{};
+        device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        device_info.queueCreateInfoCount = 1;
+        device_info.pQueueCreateInfos = &queue_info;
+        device_info.enabledExtensionCount = 1;
+        device_info.ppEnabledExtensionNames = extensions;
+        if (vkCreateDevice(physical, &device_info, nullptr, &device) != VK_SUCCESS) return false;
+        vkGetDeviceQueue(device, family, 0, &queue);
+        get_fd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR"));
+        if (!get_fd) return false;
+
+        VkEventCreateInfo event_info{};
+        event_info.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
+        if (vkCreateEvent(device, &event_info, nullptr, &event) != VK_SUCCESS) return false;
+        VkExportSemaphoreCreateInfo external{};
+        external.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+        external.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+        VkSemaphoreCreateInfo semaphore_info{};
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphore_info.pNext = &external;
+        if (vkCreateSemaphore(device, &semaphore_info, nullptr, &ready) != VK_SUCCESS) return false;
+        VkCommandPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.queueFamilyIndex = family;
+        if (vkCreateCommandPool(device, &pool_info, nullptr, &pool) != VK_SUCCESS) return false;
+        VkCommandBufferAllocateInfo alloc{};
+        alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc.commandPool = pool;
+        alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device, &alloc, &command) != VK_SUCCESS) return false;
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        if (vkBeginCommandBuffer(command, &begin) != VK_SUCCESS) return false;
+        vkCmdWaitEvents(command, 1, &event, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr, 0, nullptr, 0, nullptr);
+        if (vkEndCommandBuffer(command) != VK_SUCCESS) return false;
+        return true;
+    }
+
+    // Submits the gated producer and returns its unsignaled SYNC_FD, or -1.
+    int submit() {
+        vkResetEvent(device, event);
+        VkSubmitInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        info.commandBufferCount = 1;
+        info.pCommandBuffers = &command;
+        info.signalSemaphoreCount = 1;
+        info.pSignalSemaphores = &ready;
+        if (vkQueueSubmit(queue, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS) return -1;
+        VkSemaphoreGetFdInfoKHR export_info{};
+        export_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
+        export_info.semaphore = ready;
+        export_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+        int fd = -1;
+        if (get_fd(device, &export_info, &fd) != VK_SUCCESS) return -1;
+        return fd;
+    }
+
+    void release() {
+        if (device) vkSetEvent(device, event);
+    }
+
+    ~ggml_vk_npu_gate() {
+        if (!device) return;
+        release();
+        vkDeviceWaitIdle(device);
+        if (pool) vkDestroyCommandPool(device, pool, nullptr);
+        if (ready) vkDestroySemaphore(device, ready, nullptr);
+        if (event) vkDestroyEvent(device, event, nullptr);
+        vkDestroyDevice(device, nullptr);
+        if (instance) vkDestroyInstance(instance, nullptr);
+    }
+};
+
+// Ports experiments/fences/check_fences.cpp. The gate exports a binary semaphore
+// as a SYNC_FD fence and attaches it to a probe buffer; the submitted NPU job
+// must stay pending until the event is set from the host. Returns 1 when the
+// driver waits, 0 when it does not, -1 when the probe could not run.
+static int ggml_vk_npu_test_incoming_fence(xrt::device & device, xrt::kernel & kernel, xrt::bo & instructions,
+                                           uint32_t instruction_bytes, size_t a_bytes, size_t b_bytes, size_t c_bytes) {
+    ggml_vk_npu_gate gate;
+    if (!gate.create()) return -1;
+
+    xrt::bo a(device, a_bytes, xrt::bo::flags::host_only, kernel.group_id(3));
+    xrt::bo b(device, b_bytes, xrt::bo::flags::host_only, kernel.group_id(4));
+    xrt::bo c(device, c_bytes, xrt::bo::flags::host_only, kernel.group_id(5));
+    memset(a.map<void *>(), 0, a_bytes);
+    memset(b.map<void *>(), 0, b_bytes);
+    memset(c.map<void *>(), 0, c_bytes);
+
+    auto submit = [&]() {
+        xrt::run run(kernel);
+        run.set_arg(0, uint32_t(3));
+        run.set_arg(1, instructions);
+        run.set_arg(2, instruction_bytes);
+        run.set_arg(3, a);
+        run.set_arg(4, b);
+        run.set_arg(5, c);
+        return run;
+    };
+
+    // Poll the ERT state instead of run::wait(): wait() keys off queue-wide
+    // completion signals, so a job that must stay pending trips its state check.
+    auto completed_within = [](const xrt::run & run, std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (run.state() != ERT_CMD_STATE_COMPLETED) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    };
+
+    // Control: without an incoming fence the job must complete.
+    {
+        auto run = submit();
+        run.start();
+        if (!completed_within(run, std::chrono::milliseconds(10000))) return -1;
+    }
+
+    const int fence_fd = gate.submit();
+    if (fence_fd == -1) return -1;
+    const int dmabuf_fd = c.export_buffer();
+    if (dmabuf_fd < 0) {
+        close(fence_fd);
+        return -1;
+    }
+    const dma_buf_import_sync_file import{DMA_BUF_SYNC_WRITE, fence_fd};
+    if (ioctl(dmabuf_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &import) < 0) {
+        close(dmabuf_fd);
+        close(fence_fd);
+        return -1;
+    }
+
+    auto run = submit();
+    run.start();
+    // If the driver honors the incoming fence, the job is still pending here.
+    const bool completed_early = completed_within(run, std::chrono::milliseconds(300));
+    // Release the event so the producer signals the fence.
+    gate.release();
+    int result = -1;
+    if (completed_early) {
+        result = 0;
+    } else if (completed_within(run, std::chrono::milliseconds(10000))) {
+        result = 1;
+    }
+    close(dmabuf_fd);
+    close(fence_fd);
+    return result;
+}
+
+static void ggml_vk_npu_ensure_incoming_fence_test(xrt::device & device, xrt::kernel & kernel, xrt::bo & instructions,
+                                                   uint32_t instruction_bytes, size_t a_bytes, size_t b_bytes, size_t c_bytes) {
+    if (g_npu_incoming_fence_tested) return;
+    g_npu_incoming_fence_tested = true;
+    try {
+        g_npu_incoming_fence = ggml_vk_npu_test_incoming_fence(device, kernel, instructions, instruction_bytes, a_bytes, b_bytes, c_bytes);
+    } catch (const std::exception & e) {
+        GGML_LOG_WARN("ggml_vulkan: incoming-fence probe failed: %s\n", e.what());
+        g_npu_incoming_fence = -1;
+    }
+    if (g_npu_incoming_fence == 0) {
+        fprintf(stderr,
+            "\033[1;31mggml_vulkan: WARNING: amdxdna does not wait for incoming dma-buf fences. "
+            "The NPU would race with Vulkan; apply the bundled amdxdna fence patch for full GPU/NPU overlap. "
+            "Falling back to a host wait on every Vulkan-to-NPU handoff.\033[0m\n");
+    } else if (g_npu_incoming_fence < 0) {
+        GGML_LOG_WARN("ggml_vulkan: could not run the Vulkan incoming-fence probe; assuming the driver waits\n");
+    }
+}
+
 static bool ggml_vk_npu_can_fuse_swiglu(ggml_backend_vk_context * ctx, const ggml_cgraph * graph, int projection_idx, int join_idx, const ggml_tensor * partner) {
     if (!getenv("GGML_VK_NPU_FFN_JOIN") || !ctx->device->pipeline_npu_swiglu || join_idx >= graph->n_nodes) return false;
     const auto * projection = graph->nodes[projection_idx];
@@ -245,6 +483,9 @@ struct ggml_vk_npu {
         instruction_bytes = uint32_t(bytes);
         profile_device = static_cast<ggml_backend_vk_context *>(backend->context)->device;
         if (packed_i8 && !profile_device->pipeline_npu_q5_pack) throw std::runtime_error("Q5_K NPU: missing activation packing pipeline");
+        if (!command_stream && !getenv("GGML_VK_NPU_CONTROL")) {
+            ggml_vk_npu_ensure_incoming_fence_test(device, kernel, instructions, instruction_bytes, a_bytes, b_bytes, c_bytes);
+        }
         GGML_LOG_INFO("ggml_vulkan: %s split M=%d K=%d N=%d: NPU=%d GPU=%d, original weights via dma-buf, %s\n",
                       label(), M, K, N, npu_n, N - npu_n, getenv("GGML_VK_NPU_CONTROL") ? "import only control" : "dma-buf fences in both directions");
     }
@@ -286,6 +527,12 @@ struct ggml_vk_npu {
         const int fd = profile_device->device.getSemaphoreFdKHR({*job.ready, vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd});
         // A SYNC_FD of -1 is already signaled.
         if (fd == -1) return;
+        if (ggml_vk_npu_incoming_fence_broken()) {
+            // The driver ignores incoming fences, so wait for the release here.
+            ggml_vk_npu_wait_sync_fd(fd);
+            close(fd);
+            return;
+        }
         const dma_buf_import_sync_file fence{DMA_BUF_SYNC_WRITE, fd};
         const int result = ioctl(storage->npu_dma_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &fence);
         const int error = errno;
@@ -990,11 +1237,17 @@ struct ggml_vk_npu_iq1 {
         submit(ctx, subctx);
         const int ready_fd = gpu->device.getSemaphoreFdKHR({*job.ready, vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd});
         if (ready_fd != -1) {
-            const dma_buf_import_sync_file fence{DMA_BUF_SYNC_WRITE, ready_fd};
-            const int result = ioctl(storage->npu_dma_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &fence);
-            const int error = errno;
-            close(ready_fd);
-            if (result < 0) throw std::system_error(error, std::generic_category(), "IQ1_S NPU: import Vulkan release fence");
+            if (ggml_vk_npu_incoming_fence_broken()) {
+                // The driver ignores incoming fences, so wait for the release here.
+                ggml_vk_npu_wait_sync_fd(ready_fd);
+                close(ready_fd);
+            } else {
+                const dma_buf_import_sync_file fence{DMA_BUF_SYNC_WRITE, ready_fd};
+                const int result = ioctl(storage->npu_dma_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &fence);
+                const int error = errno;
+                close(ready_fd);
+                if (result < 0) throw std::system_error(error, std::generic_category(), "IQ1_S NPU: import Vulkan release fence");
+            }
         }
         for (auto & run : job.runs) run.start();
         dma_buf_export_sync_file fence{};
