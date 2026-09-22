@@ -9,7 +9,11 @@ layout(constant_id = 1) const uint TOKENS_PER_WG = 16;
 layout(constant_id = 2) const bool APPLY_BIAS = false;
 layout(constant_id = 3) const bool APPLY_SILU = false;
 
+#ifdef SSM_CONV_TILED
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+#else
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
+#endif
 
 layout(binding = 0) readonly buffer Src0 { float src0[]; };
 layout(binding = 1) readonly buffer Src1 { float src1[]; };
@@ -23,6 +27,48 @@ layout(push_constant) uniform PushConstants {
     uint nc; uint ncs; uint nr; uint n_t; uint n_s;
 };
 
+#ifdef SSM_CONV_TILED
+shared float tile[35][33];
+shared float kernel[4][32];
+
+void main() {
+    const uint x = gl_LocalInvocationID.x;
+    const uint y = gl_LocalInvocationID.y;
+    const uint channel_base = gl_WorkGroupID.x * 32;
+    const uint token_base = gl_WorkGroupID.y * 32;
+    const uint sequence = gl_WorkGroupID.z;
+
+    [[unroll]] for (uint j = 0; j < 32; j += 8) {
+        const uint channel = channel_base + y + j;
+        const uint base = sequence * (nb02 / 4) + channel * (nb01 / 4) + token_base;
+        tile[x][y + j] = channel < nr && token_base + x < ncs ? src0[base + x] : 0.0f;
+        if (x < 3) {
+            tile[32 + x][y + j] = channel < nr && token_base + 32 + x < ncs ? src0[base + 32 + x] : 0.0f;
+        }
+    }
+    if (y < 4) {
+        kernel[y][x] = channel_base + x < nr ? src1[(channel_base + x) * (nb11 / 4) + y] : 0.0f;
+    }
+    barrier();
+
+    const uint channel = channel_base + x;
+    const vec4 weights = vec4(kernel[0][x], kernel[1][x], kernel[2][x], kernel[3][x]);
+    [[unroll]] for (uint j = 0; j < 32; j += 8) {
+        const uint t = y + j;
+        if (channel >= nr || token_base + t >= n_t) {
+            continue;
+        }
+        float sum = dot(vec4(tile[t][x], tile[t + 1][x], tile[t + 2][x], tile[t + 3][x]), weights);
+        if (APPLY_BIAS) {
+            sum += bias[channel];
+        }
+        if (APPLY_SILU) {
+            sum = sum / (1.0f + exp(-sum));
+        }
+        dst[sequence * (dst_nb2 / 4) + (token_base + t) * (dst_nb1 / 4) + channel] = sum;
+    }
+}
+#else
 void main() {
     const uint i1 = gl_GlobalInvocationID.x;
     const uint i2 = gl_WorkGroupID.y * TOKENS_PER_WG + gl_LocalInvocationID.y;
@@ -58,3 +104,4 @@ void main() {
     const uint dst_idx = i3 * (dst_nb2 / 4) + i2 * (dst_nb1 / 4) + i1;
     dst[dst_idx] = sum;
 }
+#endif

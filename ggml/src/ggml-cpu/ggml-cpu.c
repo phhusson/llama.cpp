@@ -2360,11 +2360,12 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 n_tasks = n_threads;
             } break;
         case GGML_OP_GET_ROWS:
+            {
+                // Large lazy embedding gathers benefit from parallel page faults.
+                n_tasks = ggml_nbytes(node->src[0]) >= UINT64_C(4) * 1024 * 1024 * 1024 && ggml_nelements(node->src[1]) >= 256 ? n_threads : 1;
+            } break;
         case GGML_OP_SET_ROWS:
             {
-                // FIXME: get_rows can use additional threads, but the cost of launching additional threads
-                // decreases performance with GPU offloading
-                //n_tasks = n_threads;
                 n_tasks = 1;
             } break;
         case GGML_OP_SCALE:

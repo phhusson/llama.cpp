@@ -1,5 +1,10 @@
 #version 450
 
+#ifdef RMS_NORM_GATE_HALF
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
 #include "generic_binary_head.glsl"
 #include "types.glsl"
 
@@ -27,6 +32,13 @@ layout (binding = 6) readonly buffer R_I {uvec2 rope_data_i[];}; // indices for 
 #define GGML_ROPE_TYPE_MROPE  8
 #define GGML_ROPE_TYPE_VISION 24
 
+#elif RMS_NORM_GATE_FUSION
+
+layout(binding = 3) readonly buffer Gate { float data_gate[]; };
+#ifdef RMS_NORM_GATE_HALF
+layout(binding = 4) writeonly buffer Half { float16_t data_half[]; };
+#endif
+
 #elif RMS_NORM_ADD_FUSION
 
 layout (binding = 3) readonly buffer C {float data_c[];};
@@ -39,7 +51,13 @@ layout (binding = 3) readonly buffer I {uvec2 data_i[];};
 #endif
 
 #extension GL_EXT_control_flow_attributes : enable
+#ifdef RMS_NORM_SUBGROUP
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define BLOCK_SIZE 64
+#else
 #define BLOCK_SIZE 512
+#endif
 
 layout (constant_id = 1) const bool do_multiply = false;
 #if RMS_NORM_ADD_FUSION
@@ -84,6 +102,9 @@ void rms_norm(uint num_iters) {
         sum += xi * xi;
     }
 
+#ifdef RMS_NORM_SUBGROUP
+    sum = subgroupAdd(sum);
+#else
     sumsh[tid] = sum;
     // sum up partial sums and write back result
     barrier();
@@ -95,6 +116,7 @@ void rms_norm(uint num_iters) {
         barrier();
     }
     sum = sumsh[0];
+#endif
 
     const FLOAT_TYPE mean = sum / FLOAT_TYPE(ncols);
     const FLOAT_TYPE scale = inversesqrt(mean + FLOAT_TYPE(p.param1));
@@ -112,7 +134,13 @@ void rms_norm(uint num_iters) {
                     value *= FLOAT_TYPE(data_e[0]);
                 }
 #endif
+#if RMS_NORM_GATE_FUSION
+                value *= 1.0f / (1.0f + exp(-data_gate[d_offset + col]));
+#endif
                 data_d[d_offset + col] = D_TYPE(value);
+#ifdef RMS_NORM_GATE_HALF
+                data_half[d_offset + col] = float16_t(value);
+#endif
             }
         } else {
             [[unroll]] for (uint col = tid, idx = 0; idx < num_iters; col += BLOCK_SIZE, ++idx) {
@@ -126,7 +154,13 @@ void rms_norm(uint num_iters) {
                     value *= FLOAT_TYPE(data_e[0]);
                 }
 #endif
+#if RMS_NORM_GATE_FUSION
+                value *= 1.0f / (1.0f + exp(-data_gate[d_offset + col]));
+#endif
                 data_d[d_offset + col] = D_TYPE(value);
+#ifdef RMS_NORM_GATE_HALF
+                data_half[d_offset + col] = float16_t(value);
+#endif
             }
         }
     } else {
@@ -151,6 +185,9 @@ void rms_norm(uint num_iters) {
 }
 
 void main() {
+#if RMS_NORM_GATE_FUSION
+    rms_norm(2);
+#else
     // instantiate the rms_norm function for several different
     // dimensions, to allow loop unrolling
     uint num_blocks = (p.ne00 + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -175,4 +212,5 @@ void main() {
     } else if (num_blocks == 1) {
         rms_norm(1);
     }
+#endif
 }

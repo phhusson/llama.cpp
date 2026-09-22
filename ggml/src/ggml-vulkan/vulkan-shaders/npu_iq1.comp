@@ -1,0 +1,199 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#ifdef NPU_GATHER
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#endif
+#include "types.glsl"
+
+layout(push_constant) uniform parameter {
+    uint experts;
+    uint meta;
+    uint slots;
+    uint rows;
+    uint used;
+    uint selected[24];
+    uint a_prefix_words;
+    uint a_int8;
+    uint interleaved_rows;
+} p;
+
+#ifdef NPU_SELECT
+layout(local_size_x = 256) in;
+layout(binding = 0) buffer Experts { uint routes[]; };
+shared uint ordered[4096];
+shared uint offsets[256];
+shared uint invalid;
+
+void main() {
+    const uint slot = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    if (slot >= p.slots) return;
+    uint expert = p.selected[slot];
+    if (expert == 0xffffffffu) {
+        for (uint e = tid; e < 512; e += 256) ordered[e] = e < p.experts ? (routes[e] << 9) | (511 - e) : 0;
+        barrier();
+        for (uint length = 2; length <= 512; length *= 2) {
+            for (uint stride = length / 2; stride > 0; stride /= 2) {
+                const uint left = (tid / stride) * 2 * stride + tid % stride, right = left + stride;
+                const uint a = ordered[left], b = ordered[right];
+                const bool ascending = (left & length) != 0;
+                ordered[left] = ascending ? min(a, b) : max(a, b);
+                ordered[right] = ascending ? max(a, b) : min(a, b);
+                barrier();
+            }
+        }
+        expert = 511 - (ordered[slot] & 511);
+        barrier();
+    }
+    const uint count = routes[expert];
+    const uint start = routes[p.experts + expert], meta = p.meta + slot * 4;
+    if (tid == 0) {
+        routes[meta] = expert;
+        routes[meta + 1] = 0;
+        routes[meta + 2] = start;
+        invalid = 0;
+    }
+    if (count == 0 || count > 4096) return;
+    for (uint i = tid; i < 4096; i += 256) ordered[i] = 0xffffffffu;
+    barrier();
+    for (uint row = tid; row < count; row += 256) {
+        const uint id = routes[2 * p.experts + 1 + start + row], token = id >> 16;
+        if (token >= 4096) {
+            atomicOr(invalid, 1);
+        } else if (atomicCompSwap(ordered[token], 0xffffffffu, id) != 0xffffffffu) {
+            atomicOr(invalid, 1);
+        }
+    }
+    barrier();
+    // Duplicate expert IDs use Vulkan; one packed row per token is required here.
+    if (invalid != 0) return;
+    uint local_count = 0;
+    for (uint i = 0; i < 16; ++i) local_count += uint(ordered[tid * 16 + i] != 0xffffffffu);
+    offsets[tid] = local_count;
+    barrier();
+    if (tid == 0) {
+        uint base = 0;
+        for (uint i = 0; i < 256; ++i) {
+            const uint size = offsets[i];
+            offsets[i] = base;
+            base += size;
+        }
+        routes[meta + 1] = min(count, p.rows);
+    }
+    barrier();
+    uint row = offsets[tid];
+    for (uint i = 0; i < 16; ++i) {
+        const uint id = ordered[tid * 16 + i];
+        if (id != 0xffffffffu) routes[2 * p.experts + 1 + start + row++] = id;
+    }
+}
+#elif defined(NPU_GATHER)
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint USE_INT8 = 0;
+layout(binding = 0) readonly buffer Input { float input_data[]; };
+layout(binding = 1) readonly buffer Experts { uint routes[]; };
+layout(binding = 2) writeonly buffer Activations { uint activations[]; };
+shared float maxima[256];
+
+void gather_int8() {
+    const uint features = USE_INT8 == 2 ? 640 : 2560;
+    const uint words = features / 4;
+    const uint row = gl_WorkGroupID.x, slot = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    if (row >= p.rows || slot >= p.slots) return;
+    const uint meta = p.meta + slot * 4, base = slot * (p.rows * words + p.a_prefix_words);
+    const uint route_row = p.interleaved_rows != 0 ? (row % (p.rows / 3)) * 3 + row / (p.rows / 3) : row;
+    if (row == 0 && tid < 4) activations[base + tid] = tid < 2 ? routes[meta + tid] : 0;
+    if (route_row >= routes[meta + 1]) {
+        if (tid == 0) activations[base + 4 + row] = floatBitsToUint(1e-30);
+        for (uint word = tid; word < words; word += 256) activations[base + p.a_prefix_words + row * words + word] = 0;
+        return;
+    }
+    const uint id = routes[2 * p.experts + 1 + routes[meta + 2] + route_row];
+    const uint input_row = USE_INT8 == 2 ? (id >> 16) * p.used + (id & 0xffffu) : id >> 16;
+    vec4 values[3];
+    float peak = 0.0;
+    for (uint part = 0; part < 3; ++part) {
+        const uint word = tid + part * 256, offset = input_row * features + word * 4;
+        values[part] = word < words ? vec4(input_data[offset], input_data[offset + 1], input_data[offset + 2], input_data[offset + 3]) : vec4(0.0);
+        const vec4 magnitude = abs(values[part]);
+        peak = max(peak, max(max(magnitude.x, magnitude.y), max(magnitude.z, magnitude.w)));
+    }
+    peak = subgroupMax(peak);
+    if (gl_SubgroupInvocationID == 0) maxima[gl_SubgroupID] = peak;
+    barrier();
+    if (tid == 0) {
+        peak = 0.0;
+        for (uint group = 0; group < gl_NumSubgroups; ++group) peak = max(peak, maxima[group]);
+        maxima[0] = max(peak / 127.0, 1e-30);
+        activations[base + 4 + row] = floatBitsToUint(maxima[0]);
+    }
+    barrier();
+    const float scale = maxima[0];
+    for (uint part = 0; part < 3; ++part) {
+        const uint word = tid + part * 256;
+        if (word >= words) continue;
+        const uvec4 packed = uvec4(ivec4(clamp(roundEven(values[part] / scale), vec4(-127.0), vec4(127.0)))) & uvec4(255);
+        activations[base + p.a_prefix_words + row * words + word] = packed.x | (packed.y << 8) | (packed.z << 16) | (packed.w << 24);
+    }
+}
+
+void main() {
+    if (USE_INT8 != 0) {
+        gather_int8();
+        return;
+    }
+    const uint i = gl_GlobalInvocationID.x, slot = gl_GlobalInvocationID.y;
+    if (i >= p.rows * 1280 || slot >= p.slots) return;
+    const uint row = i / 1280, k = (i % 1280) * 2;
+    const uint meta = p.meta + slot * 4;
+    const uint base = slot * (p.rows * 1280 + p.a_prefix_words);
+    if (p.a_prefix_words != 0 && i < 4) activations[base + i] = i < 2 ? routes[meta + i] : 0;
+    uint value = 0;
+    if (row < routes[meta + 1]) {
+        const uint id = routes[2 * p.experts + 1 + routes[meta + 2] + row];
+        const uint input_offset = (id >> 16) * 2560 + k;
+        value = fp32_to_bf16(input_data[input_offset]) | (fp32_to_bf16(input_data[input_offset + 1]) << 16);
+    }
+    activations[base + p.a_prefix_words + i] = value;
+}
+#else
+layout(local_size_x = 256) in;
+#ifdef NPU_DOWN
+layout(constant_id = 0) const uint C_BF16 = 0;
+layout(binding = 0) readonly buffer Gate { uint gate_data[]; };
+#else
+layout(binding = 0) readonly buffer Gate { float gate_data[]; };
+#endif
+layout(binding = 1) readonly buffer Up { float up_data[]; };
+layout(binding = 2) readonly buffer Experts { uint routes[]; };
+#ifdef NPU_DOWN
+layout(binding = 3) writeonly buffer Output { float16_t output_data[]; };
+#else
+layout(binding = 3) writeonly buffer Output { float output_data[]; };
+#endif
+layout(binding = 4) readonly buffer Activations { uint activations[]; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x, slot = gl_GlobalInvocationID.y;
+#ifdef NPU_DOWN
+    if (i >= p.rows * 2560 || slot >= p.slots) return;
+    const uint row = i / 2560, n = i % 2560, meta = p.meta + slot * 4;
+    if (row >= routes[meta + 1]) return;
+    const uint id = routes[2 * p.experts + 1 + routes[meta + 2] + row];
+    const float scale = uintBitsToFloat(activations[slot * (p.rows * 160 + p.a_prefix_words) + 4 + row]);
+    const uint index = slot * p.rows * 2560 + i;
+    const float value = C_BF16 != 0 ? uintBitsToFloat((gate_data[index / 2] >> (16 * (index % 2))) << 16) : uintBitsToFloat(gate_data[index]);
+    output_data[((id >> 16) * p.used + (id & 0xffffu)) * 2560 + n] = float16_t(value * scale);
+#else
+    if (i >= p.rows * 640 || slot >= p.slots) return;
+    const uint row = i / 640, n = i % 640, meta = p.meta + slot * 4;
+    const uint route_row = p.interleaved_rows != 0 ? (row % (p.rows / 3)) * 3 + row / (p.rows / 3) : row;
+    if (route_row >= routes[meta + 1]) return;
+    const uint id = routes[2 * p.experts + 1 + routes[meta + 2] + route_row];
+    const uint index = slot * p.rows * 640 + i;
+    const float scale = p.a_int8 != 0 ? uintBitsToFloat(activations[slot * (p.rows * 640 + p.a_prefix_words) + 4 + row]) : 1.0;
+    const float gate = gate_data[index] * scale, up = up_data[index] * scale;
+    output_data[((id >> 16) * p.used + (id & 0xffffu)) * 640 + n] = gate / (1.0f + exp(-gate)) * up;
+#endif
+}
+#endif

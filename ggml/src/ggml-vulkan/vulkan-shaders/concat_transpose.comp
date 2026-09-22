@@ -1,0 +1,59 @@
+#version 450
+
+#include "types.glsl"
+#include "generic_binary_head.glsl"
+
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+
+shared uint sh[32][33];
+
+void iter(uvec3 wg_id) {
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+    const uint i2 = wg_id.z % p.ne22;
+    const uint i3 = wg_id.z / p.ne22;
+
+    [[unroll]] for (uint y = 0; y < 32; y += 8) {
+        const uint i0 = wg_id.x * 32 + ty + y;
+        const uint i1 = wg_id.y * 32 + tx;
+        if (i0 < p.ne20 && i1 < p.ne21) {
+            if (i0 < p.ne00) {
+                sh[ty + y][tx] = data_a[get_aoffset() + i0 * p.nb00 + i1 * p.nb01 + i2 * p.nb02 + i3 * p.nb03];
+            } else {
+                sh[ty + y][tx] = data_b[get_boffset() + (i0 - p.ne00) * p.nb10 + i1 * p.nb11 + i2 * p.nb12 + i3 * p.nb13];
+            }
+        }
+    }
+
+    barrier();
+
+    [[unroll]] for (uint y = 0; y < 32; y += 8) {
+        const uint i0 = wg_id.x * 32 + tx;
+        const uint i1 = wg_id.y * 32 + ty + y;
+        if (i0 < p.ne20 && i1 < p.ne21) {
+            data_d[get_doffset() + i0 * p.nb20 + i1 * p.nb21 + i2 * p.nb22 + i3 * p.nb23] = sh[tx][ty + y];
+        }
+    }
+}
+
+void main() {
+    bool need_barrier = false;
+    const uint nx = (p.ne20 + 31) / 32;
+    const uint ny = (p.ne21 + 31) / 32;
+    for (uint z = gl_WorkGroupID.z; z < p.ne22 * p.ne23; z += gl_NumWorkGroups.z) {
+        for (uint y = gl_WorkGroupID.y; y < ny; y += gl_NumWorkGroups.y) {
+            for (uint x = gl_WorkGroupID.x; x < nx; x += gl_NumWorkGroups.x) {
+                if (need_barrier) {
+                    barrier();
+                }
+                need_barrier = true;
+                // Group nearby rows to reuse input pages.
+                const uint index = y * nx + x;
+                const uint first_row = (index / (nx * 16)) * 16;
+                const uint height = min(16, ny - first_row);
+                const uint local_index = index - first_row * nx;
+                iter(uvec3(local_index / height, first_row + local_index % height, z));
+            }
+        }
+    }
+}

@@ -1,0 +1,74 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "types.glsl"
+
+layout(local_size_x = 256) in;
+#ifdef INPUT_SWIGLU
+layout(push_constant) uniform parameter { uint M; uint K; uint prefix; uint gate; } p;
+layout(binding = 0) readonly buffer Projection { float projection[]; };
+layout(binding = 1) readonly buffer Partner { float partner[]; };
+layout(binding = 2) readonly buffer Npu { uint16_t npu[]; };
+layout(binding = 3) writeonly buffer Result { float result_data[]; };
+layout(binding = 4) writeonly buffer Output { uint output_data[]; };
+#else
+layout(push_constant) uniform parameter { uint M; uint K; } p;
+layout(binding = 0) readonly buffer Input { float input_data[]; };
+layout(binding = 1) writeonly buffer Output { uint output_data[]; };
+#ifdef OUTPUT_HALF
+layout(binding = 2) writeonly buffer HalfOutput { float16_t half_data[]; };
+#endif
+#endif
+shared float maxima[8][256];
+shared float scales[8];
+
+void main() {
+#ifdef INPUT_SWIGLU
+    const uint group = gl_WorkGroupID.y, block = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+#else
+    const uint group = gl_WorkGroupID.x, block = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+#endif
+    const uint base = (block * (p.M / 8) + group) * 528;
+    float values[8];
+    for (uint row = 0; row < 8; ++row) {
+#ifdef INPUT_SWIGLU
+        const uint token = group * 8 + row, column = block * 256 + tid;
+        const uint index = token * p.K + column;
+        const float projected = column < p.prefix ? uintBitsToFloat(uint(npu[token * p.prefix + column]) << 16) : projection[index];
+        const float a = p.gate != 0 ? projected : partner[index];
+        const float b = p.gate != 0 ? partner[index] : projected;
+        const float value = a / (1.0f + exp(-a)) * b;
+        result_data[index] = value;
+#else
+        const float value = input_data[(group * 8 + row) * p.K + block * 256 + tid];
+#endif
+#ifdef OUTPUT_HALF
+        half_data[(group * 8 + row) * p.K + block * 256 + tid] = float16_t(value);
+#endif
+        values[row] = uintBitsToFloat(fp32_to_bf16(value) << 16);
+        const float peak = subgroupMax(abs(values[row]));
+        if (gl_SubgroupInvocationID == 0) maxima[row][gl_SubgroupID] = peak;
+    }
+    barrier();
+    if (tid < 8) {
+        float peak = exp2(-60.0);
+        for (uint i = 0; i < gl_NumSubgroups; ++i) peak = max(peak, maxima[tid][i]);
+        const uint bits = floatBitsToUint(peak);
+        // ceil(log2(peak / 127)) without a rounded division or logarithm.
+        const int exponent = int(bits >> 23) - 127 - 6 + int((bits & 0x7fffffu) > 0x7e0000u);
+        scales[tid] = uintBitsToFloat(uint(exponent + 127) << 23);
+        output_data[base + 512 + tid] = floatBitsToUint(scales[tid]);
+        output_data[base + 520 + tid] = 0;
+    }
+    barrier();
+    for (uint part = 0; part < 2; ++part) {
+        uint packed = 0;
+        for (uint i = 0; i < 4; ++i) {
+            const uint row = part * 4 + i;
+            const int code = int(clamp(roundEven(values[row] / scales[row]), -127.0, 127.0));
+            packed |= (uint(code) & 255u) << (i * 8);
+        }
+        output_data[base + tid * 2 + part] = packed;
+    }
+}

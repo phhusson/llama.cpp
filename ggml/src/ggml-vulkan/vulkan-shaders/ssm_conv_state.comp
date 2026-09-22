@@ -1,0 +1,44 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer History { float history[]; };
+layout(binding = 1) readonly buffer Input { float input_data[]; };
+layout(binding = 2) readonly buffer Weights { float weights[]; };
+layout(binding = 3) writeonly buffer State { float state[]; };
+layout(binding = 4) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint history_nb1, history_nb2, input_nb0, input_nb2, weight_nb1;
+    uint state_nb1, dst_nb1, dst_nb2, channels, tokens, sequences;
+};
+
+float read_input(uint token, uint channel, uint sequence) {
+    return token < 3 ? history[sequence * history_nb2 + channel * history_nb1 + token]
+                     : input_data[sequence * input_nb2 + (token - 3) * input_nb0 + channel];
+}
+
+void main() {
+    const uint channel = gl_GlobalInvocationID.x;
+    const uint token = gl_WorkGroupID.y * 16 + gl_LocalInvocationID.y * 4;
+    const uint sequence = gl_WorkGroupID.z;
+    if (channel >= channels || token >= tokens) return;
+
+    const uint w = channel * weight_nb1;
+    const vec4 kernel = vec4(weights[w], weights[w + 1], weights[w + 2], weights[w + 3]);
+    vec4 values = vec4(read_input(token, channel, sequence), read_input(token + 1, channel, sequence), read_input(token + 2, channel, sequence), read_input(token + 3, channel, sequence));
+    [[unroll]] for (uint i = 0; i < 4; ++i) {
+        if (token + i >= tokens) break;
+        if (i != 0) values = vec4(values.yzw, input_data[sequence * input_nb2 + (token + i) * input_nb0 + channel]);
+        float sum = dot(values, kernel);
+        sum = sum / (1.0f + exp(-sum));
+        dst[sequence * dst_nb2 + (token + i) * dst_nb1 + channel] = sum;
+    }
+    if (token == 0) {
+        [[unroll]] for (uint i = 0; i < 3; ++i) {
+            state[sequence * state_nb1 + channel * 3 + i] = input_data[sequence * input_nb2 + (tokens - 3 + i) * input_nb0 + channel];
+        }
+    }
+}

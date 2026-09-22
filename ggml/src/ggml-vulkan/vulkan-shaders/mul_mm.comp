@@ -36,8 +36,23 @@
 layout (constant_id = 12) const uint MmTypeA = 0;
 #endif
 
+#if defined(COOPMAT) && !defined(MUL_MAT_ID) && defined(DATA_A_IQ2_S)
+#define IQ2S_GRID_PACKED
+#endif
+
 #include "types.glsl"
 #include "dot_product_funcs.glsl"
+
+#if defined(COOPMAT) && !defined(MUL_MAT_ID) && (defined(DATA_A_IQ3_S) || defined(DATA_A_IQ3_XXS) || defined(DATA_A_IQ4_XS))
+layout(constant_id = 14) const uint DENSE_IQ_LOAD_VEC = 4;
+#undef LOAD_VEC_A
+#define LOAD_VEC_A DENSE_IQ_LOAD_VEC
+#endif
+
+#if defined(COOPMAT) && !defined(MUL_MAT_ID) && defined(DATA_A_IQ3_XXS)
+#define DENSE_IQ3_XXS_PREFETCH
+layout(constant_id = 15) const bool PREFETCH_IQ3_XXS = false;
+#endif
 
 #ifndef MULMAT_QUANT
 #ifndef LOAD_VEC_A
@@ -52,6 +67,12 @@ layout (constant_id = 11) const uint ALIGNED = 0;
 
 #ifdef MULMAT_QUANT
 
+#if defined(COOPMAT) && !defined(MUL_MAT_ID)
+layout(constant_id = 15) const uint DENSE_K_LOAD_VEC = 4;
+#else
+#define DENSE_K_LOAD_VEC 4u
+#endif
+
 uint mm_load_vec_a() {
     switch (MmTypeA) {
     case GGML_TYPE_Q1_0:
@@ -62,10 +83,11 @@ uint mm_load_vec_a() {
     case GGML_TYPE_Q2_0:
     case GGML_TYPE_Q5_0:
     case GGML_TYPE_Q8_0:
-    case GGML_TYPE_Q2_K:
-    case GGML_TYPE_Q4_K:
     case GGML_TYPE_Q5_K:
         return 4u;
+    case GGML_TYPE_Q2_K:
+    case GGML_TYPE_Q4_K:
+        return DENSE_K_LOAD_VEC;
     default:
         return 2u;
     }
@@ -126,6 +148,9 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
 layout (binding = 3) readonly buffer IDS {int data_ids[];};
 layout (binding = 4) readonly buffer Counts {int data_expert_count[];};
 #endif
+#ifdef MOE_GATE_UP
+layout (binding = 5) readonly buffer Up {A_TYPE data_up[];};
+#endif
 
 layout (push_constant) uniform parameter
 {
@@ -147,6 +172,8 @@ layout (push_constant) uniform parameter
     uint ne11;
     uint n_experts;
     uint hoist_row_ids;
+    uint npu_slots;
+    uint npu_meta;
 #else
     uint base_work_group_z;
     uint num_batches;
@@ -191,13 +218,27 @@ const bool APPLY_SLM_A_RESHAPE = false;
 #endif
 #define SHMEM_STRIDE (BK / 2 + SHMEM_STRIDE_PAD)
 
+#if defined(COOPMAT) && defined(MUL_MAT_ID) && !defined(MULMAT_QUANT)
+layout(constant_id = 14) const uint EXPERT_MIN_TOKENS = 0;
+layout(constant_id = 15) const uint EXPERT_MAX_TOKENS = 0xffffffffu;
+layout(constant_id = 16) const bool NPU_EXPERT_SPLIT = false;
+#endif
+
+#ifdef MOE_GATE_UP
+shared FLOAT_TYPEV2 buf_a[2 * BM * SHMEM_STRIDE];
+#else
 shared FLOAT_TYPEV2 buf_a[BM * SHMEM_STRIDE];
+#endif
 shared FLOAT_TYPEV2 buf_b[BN * SHMEM_STRIDE];
 
 #define NUM_WARPS (BLOCK_SIZE / WARP)
 
 #ifdef COOPMAT
+#ifdef MOE_GATE_UP
+shared float coopmat_stage[TM * TN * NUM_WARPS];
+#else
 shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
+#endif
 #endif
 
 #include "mul_mm_id_funcs.glsl"
@@ -208,13 +249,31 @@ shared ACC_TYPE coopmat_stage[TM * TN * NUM_WARPS];
 #endif
 
 void main() {
-    const uint ic = gl_WorkGroupID.y;
+    uint ic = gl_WorkGroupID.y;
 
 #ifdef MUL_MAT_ID
-    const uint expert_idx = gl_WorkGroupID.z;
+    uint expert_idx = gl_WorkGroupID.z;
+#if defined(COOPMAT) && !defined(MULMAT_QUANT)
+    if (EXPERT_MIN_TOKENS == 17 && BN == 64 && (p.hoist_row_ids & 2u) != 0) {
+        const uint map_base = 2 * p.n_experts + 1 + p.nei0 * p.nei1;
+        if (gl_WorkGroupID.z >= data_expert_count[map_base]) return;
+        const uint entry = uint(data_expert_count[map_base + 1 + gl_WorkGroupID.z]);
+        expert_idx = entry & 0xffffu;
+        ic = entry >> 16;
+    }
+    if (data_expert_count[expert_idx] < EXPERT_MIN_TOKENS || data_expert_count[expert_idx] > EXPERT_MAX_TOKENS) return;
+#endif
     if (ic * BN >= data_expert_count[expert_idx]) {
         return;
     }
+#if defined(COOPMAT) && !defined(MULMAT_QUANT)
+    if (NPU_EXPERT_SPLIT) {
+        for (uint slot = 0; slot < p.npu_slots; ++slot) {
+            const uint meta = p.npu_meta + slot * 4;
+            if (expert_idx == uint(data_expert_count[meta]) && ic * BN < uint(data_expert_count[meta + 1])) return;
+        }
+    }
+#endif
 #endif
 #if defined(NEEDS_INIT_IQ_SHMEM) || defined(MULMAT_QUANT)
     init_iq_shmem(gl_WorkGroupSize);
@@ -340,9 +399,16 @@ void main() {
     coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a;
     coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b;
     coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums[cms_per_row * cms_per_col];
+#ifdef MOE_GATE_UP
+    coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_up;
+    coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums_up[cms_per_row * cms_per_col];
+#endif
 
     [[unroll]] for (uint i = 0; i < cms_per_row * cms_per_col; i++) {
         sums[i] = coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0f);
+#ifdef MOE_GATE_UP
+        sums_up[i] = coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0f);
+#endif
     }
 #else
     ACC_TYPEV2 sums[WMITER * TM * WNITER * TN/2];
@@ -359,9 +425,20 @@ void main() {
     }
 #endif
 
+#ifdef DENSE_IQ3_XXS_PREFETCH
+    if (PREFETCH_IQ3_XXS && start_k < end_k) {
+        prefetch_iq3_xxs(pos_a, loadr_a, loadc_a);
+    }
+#endif
+
     for (uint block = start_k; block < end_k; block += BK) {
         [[unroll]] for (uint l = 0; l < BM; l += loadstride_a) {
+#ifdef MOE_GATE_UP
+            load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k, false);
+            load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k, true);
+#else
             load_a_to_shmem(pos_a, loadr_a, loadc_a + l, ir * BM + loadc_a + l, block, end_k);
+#endif
         }
         [[unroll]] for (uint l = 0; l < BN; l += loadstride_b) {
 #if !defined(MUL_MAT_ID)
@@ -376,16 +453,32 @@ void main() {
         pos_a += BK / LOAD_VEC_A_EFF;
         pos_b += BK / LOAD_VEC_B_EFF;
 
+#ifdef DENSE_IQ3_XXS_PREFETCH
+        if (PREFETCH_IQ3_XXS) {
+            const uint next_pos = pos_a - uint(block + BK >= end_k) * (BK / LOAD_VEC_A_EFF);
+            prefetch_iq3_xxs(next_pos, loadr_a, loadc_a);
+        }
+#endif
+
 #ifdef COOPMAT
         [[unroll]] for (uint i = 0; i < BK; i += TK) {
             [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
                 // Load from shared into cache
                 coopMatLoad(cache_a, buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
+#ifdef MOE_GATE_UP
+                coopMatLoad(cache_up, buf_a, BM * SHMEM_STRIDE + a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
+#endif
 
                 [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+#ifdef MUL_MAT_ID
+                    if ((BN != WN || cm_col != 0) && ic * BN + warp_c * WN + cm_col * TN >= _ne1) continue;
+#endif
                     coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
 
                     sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a, cache_b, sums[cm_col * cms_per_row + cm_row]);
+#ifdef MOE_GATE_UP
+                    sums_up[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_up, cache_b, sums_up[cm_col * cms_per_row + cm_row]);
+#endif
                 }
             }
         }
@@ -434,6 +527,9 @@ void main() {
     [[unroll]] for (uint j = 0; j < cms_per_row * cms_per_col; j++) {
         [[unroll]] for (uint i = 0; i < sums[j].length(); ++i) {
             sums[j][i] = clamp(sums[j][i], -ACC_TYPE_MAX, ACC_TYPE_MAX);
+#ifdef MOE_GATE_UP
+            sums_up[j][i] = clamp(sums_up[j][i], -ACC_TYPE_MAX, ACC_TYPE_MAX);
+#endif
         }
     }
 #else
@@ -455,9 +551,20 @@ void main() {
 #ifdef MUL_MAT_ID
     [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
         [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+            if ((BN != WN || cm_col != 0) && dc + cm_col * TN >= _ne1) continue;
+#ifdef MOE_GATE_UP
+            coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> activated = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(sums[cm_col * cms_per_row + cm_row]);
+            coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> up = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(sums_up[cm_col * cms_per_row + cm_row]);
+            [[unroll]] for (uint i = 0; i < activated.length(); ++i) {
+                const float gate = activated[i];
+                activated[i] = gate / (1.0f + exp(-gate)) * up[i];
+            }
+            coopMatStore(activated, coopmat_stage, warp_i * TM * TN, TM, gl_CooperativeMatrixLayoutColumnMajor);
+#else
             coopMatStore(sums[cm_col * cms_per_row + cm_row], coopmat_stage, warp_i * TM * TN, TM, gl_CooperativeMatrixLayoutColumnMajor);
+#endif
 
-            barrier();
+            controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
             [[unroll]] for (uint col = 0; col < TN; col += storestride) {
                 const uint row_i = dc + cm_col * TN + col + store_c;
                 if (row_i >= _ne1) break;
@@ -468,7 +575,7 @@ void main() {
                     data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr + cm_row * TM + store_r] = D_TYPE(coopmat_stage[warp_i * TM * TN + (col + store_c) * TM + store_r]);
                 }
             }
-            barrier();
+            controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
         }
     }
 #else

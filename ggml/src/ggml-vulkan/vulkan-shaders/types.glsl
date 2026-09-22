@@ -983,7 +983,11 @@ void init_iq_shmem(uvec3 wgsize)
 
 #if defined(DATA_A_IQ2_XXS) || defined(DATA_A_IQ2_XS) || defined(DATA_A_IQ2_S)
 #if defined(DATA_A_IQ2_S)
+#ifdef IQ2S_GRID_PACKED
+shared uint iq2s_grid[1024];
+#else
 shared uvec2 iq2s_grid[1024];
+#endif
 #elif defined(DATA_A_IQ2_XS)
 shared uvec2 iq2xs_grid[512];
 #else
@@ -1550,13 +1554,30 @@ const uvec2 iq2s_grid_const[1024] = {
 };
 
 #if defined(DATA_A_IQ2_S)
+#ifdef IQ2S_GRID_PACKED
+uvec2 unpack_iq2s_grid(uint packed) {
+    uvec2 x = uvec2(packed & 255u, packed >> 8);
+    x = (x | (x << 12)) & 0x000f000fu;
+    x = (x | (x << 6)) & 0x03030303u;
+    return uvec2(0x08080808u) + 17u * x + ((x >> 1) & 0x01010101u);
+}
+#endif
+
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize)
 {
     // copy the table into shared memory and sync
     [[unroll]] for (uint i = 0; i < iq2s_grid.length(); i += wgsize.x) {
         if (iq2s_grid.length() % wgsize.x == 0 || i + gl_LocalInvocationIndex.x < iq2s_grid_const.length()) {
+#ifdef IQ2S_GRID_PACKED
+            // Each byte's bits 4 and 5 encode 8, 25, or 43.
+            uvec2 x = (iq2s_grid_const[i + gl_LocalInvocationIndex.x] >> 4) & 0x03030303u;
+            x = (x | (x >> 6)) & 0x000f000fu;
+            x = (x | (x >> 12)) & 0xffu;
+            iq2s_grid[i + gl_LocalInvocationIndex.x] = x.x | (x.y << 8);
+#else
             iq2s_grid[i + gl_LocalInvocationIndex.x] = iq2s_grid_const[i + gl_LocalInvocationIndex.x];
+#endif
         }
     }
     barrier();

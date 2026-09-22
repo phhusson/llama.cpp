@@ -1,0 +1,69 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#include "generic_binary_head.glsl"
+#include "types.glsl"
+
+layout(binding = 3) writeonly buffer Packed { uint8_t packed_data[]; };
+layout(local_size_x = 512) in;
+
+shared float sumsh[512];
+shared float maxima[160];
+shared float scales[20];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint ncols = p.ne00;
+    const uint nrows = p.ne01;
+    const uint offset = row * ncols;
+    float sum = 0.0f;
+    [[unroll]] for (uint i = 0; i < 10; ++i) {
+        const float x = data_a[offset + i * 512 + tid];
+        sum += x * x;
+    }
+    sumsh[tid] = sum;
+    barrier();
+    [[unroll]] for (uint step = 256; step > 0; step >>= 1) {
+        if (tid < step) {
+            sum += sumsh[tid + step];
+            sumsh[tid] = sum;
+        }
+        barrier();
+    }
+    const float scale = inversesqrt(sumsh[0] / float(ncols) + p.param1);
+    float values[10];
+    [[unroll]] for (uint i = 0; i < 10; ++i) {
+        const uint column = i * 512 + tid;
+        const float value = scale * data_a[offset + column] * data_b[column];
+        data_d[offset + column] = value;
+        values[i] = uintBitsToFloat(fp32_to_bf16(value) << 16);
+        const float peak = subgroupMax(abs(values[i]));
+        if (gl_SubgroupInvocationID == 0) maxima[i * gl_NumSubgroups + gl_SubgroupID] = peak;
+    }
+    barrier();
+    if (tid < 20) {
+        const uint first = (tid / 2) * gl_NumSubgroups + (tid % 2) * (256 / gl_SubgroupSize);
+        float peak = exp2(-60.0);
+        for (uint s = 0; s < 256 / gl_SubgroupSize; ++s) peak = max(peak, maxima[first + s]);
+        const uint bits = floatBitsToUint(peak);
+        const int exponent = int(bits >> 23) - 127 - 6 + int((bits & 0x7fffffu) > 0x7e0000u);
+        const uint scale_bits = uint(exponent + 127) << 23;
+        scales[tid] = uintBitsToFloat(scale_bits);
+        const uint base = (tid * (nrows / 8) + row / 8) * 2112 + (row % 8) * 4;
+        for (uint byte = 0; byte < 4; ++byte) {
+            packed_data[base + 2048 + byte] = uint8_t(scale_bits >> (8 * byte));
+            packed_data[base + 2080 + byte] = uint8_t(0);
+        }
+    }
+    barrier();
+    [[unroll]] for (uint i = 0; i < 10; ++i) {
+        const uint block = 2 * i + tid / 256;
+        const uint base = (block * (nrows / 8) + row / 8) * 2112;
+        const int code = int(clamp(roundEven(values[i] / scales[block]), -127.0, 127.0));
+        packed_data[base + (tid % 256) * 8 + row % 8] = uint8_t(code);
+    }
+}

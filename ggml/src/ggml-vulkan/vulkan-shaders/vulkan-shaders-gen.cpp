@@ -637,6 +637,12 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
             if (!coopmat2) {
                 string_to_spv(shader_name + "_" + tname + "_f32" + dot2_sfx, source_name, merge_maps(merge_maps(base_dict, float_type_dict), {{data_a_key, "1"}, {"LOAD_VEC_A", lva}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}}), fp16, coopmat, coopmat2, f16acc);
             }
+            if ((tname == "iq4_nl" || tname == "iq1_s" || tname == "iq2_xxs") && fp16 && coopmat && f16acc && matmul_id_type == MatMulIdType::SUBGROUP) {
+                string_to_spv("matmul_id_" + tname + "_half", source_name, merge_maps(merge_maps(base_dict, float_type_dict), {{data_a_key, "1"}, {"LOAD_VEC_A", lva}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float16_t"}}), fp16, coopmat, coopmat2, f16acc);
+                if (tname == "iq1_s" || tname == "iq2_xxs") {
+                    string_to_spv("matmul_id_" + tname + "_gate_up", source_name, merge_maps(merge_maps(base_dict, float_type_dict), {{data_a_key, "1"}, {"MOE_GATE_UP", "1"}, {"LOAD_VEC_A", lva}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}}), fp16, coopmat, coopmat2, f16acc);
+                }
+            }
 
 #if defined(GGML_VULKAN_FLOAT_E2M1_GLSLC_SUPPORT) && defined(GGML_VULKAN_FLOAT_E4M3_GLSLC_SUPPORT)
             if ((tname == "mxfp4" || tname == "nvfp4") && (coopmat || coopmat2)) {
@@ -668,6 +674,9 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
 
         if (!coopmat2) {
             string_to_spv(shader_name + "_quant_f32" + dot2_sfx, source_name, merge_maps(merge_maps(base_dict, quant_float_type_dict), {{"MULMAT_QUANT", "1"}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}}), fp16, coopmat, coopmat2, f16acc);
+        }
+        if (fp16 && coopmat && f16acc && matmul_id_type == MatMulIdType::NONE) {
+            string_to_spv("matmul_hc_gate", source_name, merge_maps(merge_maps(base_dict, quant_float_type_dict), {{"MULMAT_QUANT", "1"}, {"LOAD_VEC_B", load_vec}, {"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float16_t"}}), fp16, coopmat, coopmat2, f16acc);
         }
     }
 }
@@ -843,10 +852,26 @@ void process_shaders() {
     string_to_spv("mul_mat_vec_p021_f16_f32",              "mul_mat_vec_p021.comp", {{"A_TYPE", "float16_t"}, {"A_TYPEV4", "f16vec4"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}});
     string_to_spv("mul_mat_vec_nc_f16_f32", "mul_mat_vec_nc.comp", {{"A_TYPE", "float16_t"}, {"A_TYPEV4", "f16vec4"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}});
 
+    string_to_spv("moe_reduce_f32", "moe_reduce.comp", {});
+    string_to_spv("moe_reduce_f16", "moe_reduce.comp", {{"MOE_INPUT_F16", "1"}});
+    string_to_spv("moe_swiglu_f16_f32", "moe_swiglu.comp", {});
+    string_to_spv("npu_iq1_select", "npu_iq1.comp", {{"NPU_SELECT", "1"}});
+    string_to_spv("npu_q5_pack", "npu_q5_pack.comp", {});
+    string_to_spv("npu_q5_pack_half", "npu_q5_pack.comp", {{"OUTPUT_HALF", "1"}});
+    string_to_spv("npu_swiglu_pack", "npu_q5_pack.comp", {{"INPUT_SWIGLU", "1"}});
+    string_to_spv("npu_swiglu", "npu_swiglu.comp", {});
+    string_to_spv("npu_iq1_gather", "npu_iq1.comp", {{"NPU_GATHER", "1"}});
+    string_to_spv("npu_iq1_merge", "npu_iq1.comp", {});
+    string_to_spv("npu_iq4_merge", "npu_iq1.comp", {{"NPU_DOWN", "1"}});
+
     // Norms
     string_to_spv("norm_f32", "norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("group_norm_f32", "group_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("rms_norm_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+    string_to_spv("npu_rms_pack", "npu_rms_pack.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+    string_to_spv("rms_norm_subgroup_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_SUBGROUP", "1"}}));
+    string_to_spv("rms_norm_gate_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_SUBGROUP", "1"}, {"RMS_NORM_GATE_FUSION", "1"}}));
+    string_to_spv("rms_norm_gate_half", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_SUBGROUP", "1"}, {"RMS_NORM_GATE_FUSION", "1"}, {"RMS_NORM_GATE_HALF", "1"}}));
     string_to_spv("rms_norm_mul_add_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_ADD_FUSION", "1"}}));
     string_to_spv("rms_norm_mul_add_partials_f32", "rms_norm_partials.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_ADD_FUSION", "1"}}));
     string_to_spv("rms_norm_set_rows_f32_f32", "rms_norm.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"RMS_NORM_SET_ROWS_FUSION", "1"}}));
@@ -949,6 +974,7 @@ void process_shaders() {
     string_to_spv("concat_i8", "concat.comp", {{"A_TYPE", "uint8_t"}, {"B_TYPE", "uint8_t"}, {"D_TYPE", "uint8_t"}});
     string_to_spv("concat_i16", "concat.comp", {{"A_TYPE", "uint16_t"}, {"B_TYPE", "uint16_t"}, {"D_TYPE", "uint16_t"}});
     string_to_spv("concat_i32", "concat.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
+    string_to_spv("concat_transpose_i32", "concat_transpose.comp", {{"A_TYPE", "uint"}, {"B_TYPE", "uint"}, {"D_TYPE", "uint"}});
     string_to_spv("concat_i64", "concat.comp", {{"A_TYPE", "uvec2"}, {"B_TYPE", "uvec2"}, {"D_TYPE", "uvec2"}});
 
     string_to_spv("upscale_f32", "upscale.comp", {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}});
@@ -1096,7 +1122,13 @@ void process_shaders() {
     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
     string_to_spv("dsv4_hc_comb_f32", "dsv4_hc_comb.comp", {});
     string_to_spv("dsv4_hc_pre_f32",  "dsv4_hc_pre.comp",  {});
+    string_to_spv("dsv4_hc_pre_f16_gate", "dsv4_hc_pre.comp", {{"HC_GATE_F16", "1"}});
+    string_to_spv("dsv4_hc_pre_f16_input", "dsv4_hc_pre.comp", {{"HC_INPUT_F16", "1"}});
+    string_to_spv("dsv4_hc_pre_f16_both", "dsv4_hc_pre.comp", {{"HC_INPUT_F16", "1"}, {"HC_GATE_F16", "1"}});
     string_to_spv("dsv4_hc_post_f32", "dsv4_hc_post.comp", {});
+    string_to_spv("hc_post_norm", "hc_post_norm.comp", {});
+    string_to_spv("hc_post_norm_half", "hc_post_norm.comp", {{"HC_NORM_HALF", "1"}});
+    string_to_spv("hc_post_norm_compact", "hc_post_norm.comp", {{"HC_NORM_COMPACT", "1"}});
     string_to_spv("cumsum_f32", "cumsum.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cumsum_multipass1_f32", "cumsum_multipass1.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cumsum_multipass2_f32", "cumsum_multipass2.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
@@ -1220,6 +1252,8 @@ void process_shaders() {
     string_to_spv("ssm_scan_subgroup_f32", "ssm_scan.comp", {{"A_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}});
 
     string_to_spv("ssm_conv_f32", "ssm_conv.comp", {{"A_TYPE", "float"}});
+    string_to_spv("ssm_conv_state_f32", "ssm_conv_state.comp", {{"A_TYPE", "float"}});
+    string_to_spv("ssm_conv_tiled_f32", "ssm_conv.comp", {{"A_TYPE", "float"}, {"SSM_CONV_TILED", "1"}});
 
     string_to_spv("topk_moe_f32", "topk_moe.comp", {});
 

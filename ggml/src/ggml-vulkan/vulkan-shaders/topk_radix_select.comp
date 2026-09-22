@@ -114,13 +114,46 @@ void topk(const uint row) {
         barrier();
     }
 
+    // Select the lowest indices among cutoff ties, independent of atomic arrival order.
+    const uint threshold = prefix;
+    uint tie_index = 0;
+    for (int shift = max(0, findMSB(ncols - 1u)) / RADIX_BITS * RADIX_BITS; shift >= 0; shift -= RADIX_BITS) {
+        for (uint i = tid; i < RADIX_SIZE; i += BLOCK_SIZE) {
+            histo[i] = 0;
+        }
+        barrier();
+
+        const uint hi_mask = (shift + RADIX_BITS >= 32) ? 0u : (0xFFFFFFFFu << uint(shift + RADIX_BITS));
+        for (uint i = tid; i < ncols; i += BLOCK_SIZE) {
+            if ((i & hi_mask) == (tie_index & hi_mask) && f2ui(load(row, i, false)) == threshold) {
+                atomicAdd(histo[(i >> uint(shift)) & (RADIX_SIZE - 1)], 1u);
+            }
+        }
+        barrier();
+
+        if (tid == 0) {
+            uint acc = 0;
+            for (uint b = 0; b < RADIX_SIZE; ++b) {
+                if (acc + histo[b] >= desired) {
+                    sh_bucket = b;
+                    sh_above = acc;
+                    break;
+                }
+                acc += histo[b];
+            }
+        }
+        barrier();
+        tie_index |= sh_bucket << uint(shift);
+        desired -= sh_above;
+        barrier();
+    }
+
     if (tid == 0) {
         out_count = 0;
     }
     barrier();
 
     // emit everything above the threshold, then fill the rest from ties
-    const uint threshold = prefix;
     for (uint i = tid; i < ncols; i += BLOCK_SIZE) {
         if (f2ui(load(row, i, false)) > threshold) {
             data_d[row_out + atomicAdd(out_count, 1u)] = int(i);
@@ -128,7 +161,7 @@ void topk(const uint row) {
     }
     barrier();
     for (uint i = tid; i < ncols; i += BLOCK_SIZE) {
-        if (f2ui(load(row, i, false)) == threshold) {
+        if (i <= tie_index && f2ui(load(row, i, false)) == threshold) {
             const uint pos = atomicAdd(out_count, 1u);
             if (pos < p.k) {
                 data_d[row_out + pos] = int(i);

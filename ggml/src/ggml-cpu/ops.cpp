@@ -12,6 +12,11 @@
 #include <cfloat>
 #include <cmath>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 // ggml_compute_forward_dup
 
 static void ggml_compute_forward_dup_same_cont(
@@ -5005,6 +5010,24 @@ static void ggml_compute_forward_get_rows_q(
     // row range for this thread
     const int ir0 = dr*ith;
     const int ir1 = MIN(ir0 + dr, nr);
+
+#if defined(__linux__)
+    if (getenv("GGML_CPU_GATHER_PREFETCH") && ggml_nbytes(src0) >= UINT64_C(4) * 1024 * 1024 * 1024 && nr >= 256) {
+        const size_t page_size = (size_t) sysconf(_SC_PAGESIZE);
+        const size_t row_size = ggml_row_size(type, nc);
+        // Queue the selected file pages before dequantization waits for them.
+        for (int64_t i = ir0; i < ir1; ++i) {
+            const int64_t i12 = i/(ne11*ne10);
+            const int64_t i11 = (i - i12*ne11*ne10)/ne10;
+            const int64_t i10 = (i - i12*ne11*ne10 - i11*ne10);
+            const int64_t i01 = *(int32_t *) ((char *) src1->data + i10*nb10 + i11*nb11 + i12*nb12);
+            GGML_ASSERT(i01 >= 0 && i01 < ne01);
+            const uintptr_t row = (uintptr_t) src0->data + i01*nb01 + i11*nb02 + i12*nb03;
+            const uintptr_t page = row / page_size * page_size;
+            madvise((void *) page, row + row_size - page, MADV_WILLNEED);
+        }
+    }
+#endif
 
     for (int64_t i = ir0; i < ir1; ++i) {
         const int64_t i12 = i/(ne11*ne10);

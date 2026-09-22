@@ -1,0 +1,62 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : require
+#if defined(HC_NORM_HALF) || defined(HC_NORM_COMPACT)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#endif
+
+#ifdef HC_NORM_COMPACT
+#define NORM_TYPE float16_t
+#else
+#define NORM_TYPE float
+#endif
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters { float eps; } p;
+layout(binding = 0) readonly buffer X { float data_x[]; };
+layout(binding = 1) readonly buffer R { float data_r[]; };
+layout(binding = 2) readonly buffer P { float data_p[]; };
+layout(binding = 3) readonly buffer G { float data_g[]; };
+layout(binding = 4) writeonly buffer S { float data_s[]; };
+layout(binding = 5) writeonly buffer D { NORM_TYPE data_d[]; };
+
+#ifdef HC_NORM_HALF
+layout(binding = 6) writeonly buffer H { float16_t data_h[]; };
+#endif
+
+shared float sums[512];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint head = gl_WorkGroupID.x;
+    const uint token = gl_WorkGroupID.y;
+    const uint offset = (token * 4 + head) * 2560;
+    const float weight = data_p[token * 4 + head];
+    float values[5];
+    float sum = 0.0f;
+    [[unroll]] for (uint i = 0; i < 5; ++i) {
+        const uint col = tid + i * 512;
+        values[i] = data_x[token * 2560 + col] * weight + data_r[offset + col];
+        data_s[offset + col] = values[i];
+        sum += values[i] * values[i];
+    }
+    sums[tid] = sum;
+    barrier();
+    [[unroll]] for (uint s = 256; s > 0; s >>= 1) {
+        if (tid < s) {
+            sum += sums[tid + s];
+            sums[tid] = sum;
+        }
+        barrier();
+    }
+    const float scale = inversesqrt(sums[0] / 2560.0f + p.eps);
+    [[unroll]] for (uint i = 0; i < 5; ++i) {
+        const uint col = tid + i * 512;
+        const float value = scale * values[i] * data_g[head * 2560 + col];
+        data_d[offset + col] = NORM_TYPE(value);
+#ifdef HC_NORM_HALF
+        data_h[offset + col] = float16_t(value);
+#endif
+    }
+}

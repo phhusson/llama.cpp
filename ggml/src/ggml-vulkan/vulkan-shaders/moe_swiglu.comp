@@ -1,0 +1,18 @@
+#version 450
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform parameter { uint size; } p;
+layout(binding = 0) readonly buffer A { float16_t data_a[]; };
+layout(binding = 1) readonly buffer B { float16_t data_b[]; };
+layout(binding = 2) writeonly buffer D { float data_d[]; };
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= p.size) return;
+    const float a = float(data_a[i]);
+    const float b = float(data_b[i]);
+    data_d[i] = a / (1.0f + exp(-a)) * b;
+}

@@ -1,0 +1,36 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : require
+#ifdef MOE_INPUT_F16
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define X_TYPE float16_t
+#else
+#define X_TYPE float
+#endif
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform parameter {
+    uint width;
+    uint tokens;
+} p;
+
+layout(binding = 0) readonly buffer X { X_TYPE data_x[]; };
+layout(binding = 1) readonly buffer W { float data_w[]; };
+layout(binding = 2) writeonly buffer D { float data_d[]; };
+
+void main() {
+    const uint col = gl_GlobalInvocationID.x;
+    const uint token = gl_WorkGroupID.y;
+    if (col >= p.width || token >= p.tokens) {
+        return;
+    }
+    // Keep the rounding of the separate multiply and add operations.
+    precise float sum = 0.0f;
+    [[unroll]] for (uint expert = 0; expert < 10; ++expert) {
+        precise float value = float(data_x[(token * 10 + expert) * p.width + col]) * data_w[token * 10 + expert];
+        sum += value;
+    }
+    data_d[token * p.width + col] = sum;
+}

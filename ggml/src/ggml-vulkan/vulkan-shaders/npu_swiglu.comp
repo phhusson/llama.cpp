@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 512) in;
+layout(binding = 0) readonly buffer A { float projection[]; };
+layout(binding = 1) readonly buffer B { float partner[]; };
+layout(binding = 2) readonly buffer C { uint16_t npu[]; };
+layout(binding = 3) writeonly buffer D { float result[]; };
+layout(push_constant) uniform parameters { uint M; uint N; uint prefix; uint gate; } p;
+
+void main() {
+    const uint column = gl_GlobalInvocationID.x;
+    const uint row = gl_GlobalInvocationID.y;
+    if (column >= p.N || row >= p.M) return;
+    const uint i = row * p.N + column;
+    const float value = column < p.prefix ? uintBitsToFloat(uint(npu[row * p.prefix + column]) << 16) : projection[i];
+    const float a = p.gate != 0 ? value : partner[i];
+    const float b = p.gate != 0 ? partner[i] : value;
+    result[i] = a / (1.0f + exp(-a)) * b;
+}
