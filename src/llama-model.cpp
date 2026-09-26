@@ -1607,6 +1607,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
     for (const auto & dev : devices) {
         buft_list_t buft_list = make_gpu_buft_list(dev.dev, split_mode, tensor_split);
+        const auto own_bufts = buft_list;
+        // Keep shared weights on a GPU when another selected device supports the operation.
+        for (const auto & peer : devices) {
+            if (peer.dev == dev.dev) {
+                continue;
+            }
+            for (const auto & candidate : own_bufts) {
+                if (ggml_backend_dev_supports_buft(peer.dev, candidate.second)) {
+                    buft_list.emplace_back(peer.dev, candidate.second);
+                }
+            }
+        }
         // add CPU buffer types as a fallback
         buft_list.insert(buft_list.end(), pimpl->cpu_buft_list.begin(), pimpl->cpu_buft_list.end());
         pimpl->gpu_buft_list.emplace(dev.dev, std::move(buft_list));
