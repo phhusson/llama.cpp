@@ -1,6 +1,9 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "ggml-cpu.h"
+#ifdef GGML_USE_DMABUF
+#include "ggml-dmabuf.h"
+#endif
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
@@ -76,6 +79,9 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 static ggml_backend_buffer_type_t * ggml_backend_cpu_device_get_extra_buffers_type(ggml_backend_dev_t device) {
     static std::vector<ggml_backend_buffer_type_t> extra_bufts = [] {
         std::vector<ggml_backend_buffer_type_t> bufts = ggml_backend_cpu_get_extra_buffer_types();
+#ifdef GGML_USE_DMABUF
+        bufts.push_back(ggml_backend_dmabuf_buffer_type());
+#endif
         bufts.push_back(nullptr);
         return bufts;
     }();
