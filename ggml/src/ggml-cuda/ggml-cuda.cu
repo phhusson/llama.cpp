@@ -5360,6 +5360,13 @@ static ggml_backend_t ggml_backend_cuda_device_init_backend(ggml_backend_dev_t d
 
 static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *)dev->context;
+#if defined(GGML_USE_HIP) && defined(GGML_USE_DMABUF)
+    static const bool use_dmabuf = getenv("GGML_DMABUFT") && atoi(getenv("GGML_DMABUFT")) != 0;
+    if (use_dmabuf) {
+        GGML_ASSERT(ggml_cuda_register_dmabuf_importer(ctx->device));
+        return ggml_backend_dmabuf_buffer_type();
+    }
+#endif
     return ggml_backend_cuda_buffer_type(ctx->device);
 }
 

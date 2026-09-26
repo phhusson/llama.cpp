@@ -308,6 +308,9 @@ vk_buffer ggml_vk_import_dmabuf(vk_device& device, int fd, size_t size) {
         vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst,
         vk::SharingMode::eExclusive, 0, nullptr);
     buffer_create_info.pNext = &ext_mem_bci;
+    if (device->buffer_device_address) {
+        buffer_create_info.usage |= vk::BufferUsageFlagBits::eShaderDeviceAddress;
+    }
 
     vk_buffer buf = std::make_shared<vk_buffer_struct>();
     buf->buffer = device->device.createBuffer(buffer_create_info);
@@ -343,6 +346,12 @@ vk_buffer ggml_vk_import_dmabuf(vk_device& device, int fd, size_t size) {
     import_info.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
     import_info.fd = import_fd;
     import_info.pNext = &dedicated_info;
+
+    vk::MemoryAllocateFlagsInfo flags_info;
+    if (device->buffer_device_address) {
+        flags_info.flags = vk::MemoryAllocateFlagBits::eDeviceAddress;
+        dedicated_info.pNext = &flags_info;
+    }
 
     buf->device_memory = device->device.allocateMemory({ mem_req.size, memory_type_idx, &import_info });
     buf->memory_property_flags = mem_props.memoryTypes[memory_type_idx].propertyFlags;
