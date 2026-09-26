@@ -20,3 +20,8 @@ if (GGML_DMABUF_HAVE_DRM)
 else()
     message(WARNING "drm/drm.h not found, the NVIDIA dma-buf allocator is disabled")
 endif()
+
+check_include_file("drm/amdgpu_drm.h" GGML_DMABUF_HAVE_AMDGPU)
+if (GGML_DMABUF_HAVE_AMDGPU)
+    target_compile_definitions(ggml-base PRIVATE GGML_DMABUF_AMDGPU)
+endif()
