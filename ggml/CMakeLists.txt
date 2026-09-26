@@ -234,6 +234,7 @@ option(GGML_WEBGPU_CPU_PROFILE              "ggml: enable WebGPU profiling (CPU)
 option(GGML_WEBGPU_GPU_PROFILE              "ggml: enable WebGPU profiling (GPU)"             OFF)
 option(GGML_WEBGPU_JSPI                     "ggml: use JSPI for WebGPU"                       ON)
 option(GGML_ZDNN                            "ggml: use zDNN"                                  OFF)
+option(GGML_ANE                             "ggml: use Apple Neural Engine (private API)"       OFF)
 option(GGML_DMABUF                          "ggml: use dma-buf shared memory buffer type (Linux)" OFF)
 option(GGML_FAKENPU                         "ggml: use the fake NPU test backend"    OFF)
 option(GGML_VIRTGPU                         "ggml: use the VirtGPU/Virglrenderer API Remoting frontend"     OFF)
@@ -336,6 +337,7 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-cpp.h
     include/ggml-cuda.h
     include/ggml-opt.h
+    include/ggml-ane.h
     include/ggml-metal.h
     include/ggml-rpc.h
     include/ggml-virtgpu.h

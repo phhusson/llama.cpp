@@ -76,13 +76,7 @@ static bool ggml_metal_fusion_same_buffer(const ggml_tensor * a, const ggml_tens
         return false;
     }
 
-    ggml_backend_buffer_t ba = a->view_src ? a->view_src->buffer : a->buffer;
-    ggml_backend_buffer_t bb = b->view_src ? b->view_src->buffer : b->buffer;
-
-    ggml_metal_buffer_t ca = (ggml_metal_buffer_t) ba->context;
-    ggml_metal_buffer_t cb = (ggml_metal_buffer_t) bb->context;
-
-    return ggml_metal_buffer_get_id(ca, a).metal == ggml_metal_buffer_get_id(cb, b).metal;
+    return ggml_metal_get_buffer_id(a).metal == ggml_metal_get_buffer_id(b).metal;
 }
 
 // ---- pattern checks ------------------------------------------------------

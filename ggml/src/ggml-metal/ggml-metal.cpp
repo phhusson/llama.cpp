@@ -1,3 +1,4 @@
+#include "ggml-ane.h"
 #include "ggml-metal.h"
 
 #include "ggml-impl.h"
@@ -581,6 +582,43 @@ static void ggml_backend_metal_set_n_cb(ggml_backend_t backend, int n_cb) {
     ggml_metal_set_n_cb(ctx, n_cb);
 }
 
+static const ggml_backend_ane_buffer_api * ggml_metal_ane_api(ggml_backend_buffer_type_t buft) {
+    ggml_backend_reg_t reg = buft && buft->device ? buft->device->reg : nullptr;
+    if (!reg) {
+        return nullptr;
+    }
+    auto get_api = (ggml_backend_ane_get_buffer_api_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_ane_get_buffer_api");
+    return get_api ? get_api() : nullptr;
+}
+
+struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * tensor) {
+    ggml_metal_buffer_id result = { nullptr, 0 };
+    if (!tensor) {
+        return result;
+    }
+    ggml_backend_buffer_t buffer = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    if (!buffer) {
+        return result;
+    }
+    if (ggml_backend_buffer_is_metal(buffer)) {
+        return ggml_metal_buffer_get_id((ggml_metal_buffer_t) buffer->context, tensor);
+    }
+    const auto * api = ggml_metal_ane_api(buffer->buft);
+    if (api) {
+        api->get_buffer(tensor, &result.metal, &result.offs);
+    }
+    return result;
+}
+
+static ggml_backend_fence_t ggml_backend_metal_event_export_fence(ggml_backend_t backend, ggml_backend_event_t event) {
+    GGML_UNUSED(backend);
+    return ggml_metal_event_export_fence((ggml_metal_event_t) event->context);
+}
+
+static bool ggml_backend_metal_fence_wait(ggml_backend_t backend, ggml_backend_fence_t fence) {
+    return ggml_metal_fence_wait((ggml_metal_t) backend->context, fence);
+}
+
 static ggml_backend_i ggml_backend_metal_i = {
     /* .get_name                = */ ggml_backend_metal_name,
     /* .free                    = */ ggml_backend_metal_free,
@@ -598,8 +636,8 @@ static ggml_backend_i ggml_backend_metal_i = {
     /* .event_record            = */ ggml_backend_metal_event_record,
     /* .event_wait              = */ ggml_backend_metal_event_wait,
     /* .graph_optimize          = */ ggml_backend_metal_graph_optimize,
-    /* .event_export_fence      = */ NULL,
-    /* .fence_wait              = */ NULL,
+    /* .event_export_fence      = */ ggml_backend_metal_event_export_fence,
+    /* .fence_wait              = */ ggml_backend_metal_fence_wait,
 };
 
 static ggml_guid_t ggml_backend_metal_guid(void) {
@@ -753,6 +791,10 @@ static bool ggml_backend_metal_device_supports_op(ggml_backend_dev_t dev, const 
 }
 
 static bool ggml_backend_metal_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+    const auto * api = ggml_metal_ane_api(buft);
+    if (api && api->supports_buft(buft, ggml_metal_device_get_obj((ggml_metal_device_t) dev->context))) {
+        return true;
+    }
     return
         buft->device == dev && (
         buft->iface.get_name == ggml_backend_metal_buffer_type_shared_get_name ||

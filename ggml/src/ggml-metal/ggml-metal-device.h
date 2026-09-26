@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggml.h"
+#include "ggml-backend.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -304,6 +305,8 @@ struct ggml_metal_device_props {
 
 typedef struct ggml_metal_event * ggml_metal_event_t;
 
+ggml_backend_fence_t ggml_metal_event_export_fence(ggml_metal_event_t ev);
+
 void ggml_metal_event_encode_signal(ggml_metal_event_t ev, ggml_metal_cmd_buf_t cmd_buf);
 void ggml_metal_event_encode_wait  (ggml_metal_event_t ev, ggml_metal_cmd_buf_t cmd_buf);
 
@@ -359,6 +362,8 @@ void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
 // the assumption is that there is 1-to-1 mapping between the host and device memory buffers, so we can find the
 // Metal buffer based on the host memory pointer
 //
+struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * tensor);
+
 struct ggml_metal_buffer_id ggml_metal_buffer_get_id(ggml_metal_buffer_t buf, const struct ggml_tensor * t);
 
 #ifdef __cplusplus

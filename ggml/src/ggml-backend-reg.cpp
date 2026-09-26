@@ -90,6 +90,10 @@
 #include "ggml-et.h"
 #endif
 
+#ifdef GGML_USE_ANE
+#include "ggml-ane.h"
+#endif
+
 
 #ifdef GGML_USE_FAKENPU
 #include "ggml-fakenpu.h"
@@ -175,6 +179,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_CPU
         register_backend(ggml_backend_cpu_reg());
+#endif
+#ifdef GGML_USE_ANE
+        register_backend(ggml_backend_ane_reg());
 #endif
 #ifdef GGML_USE_FAKENPU
         register_backend(ggml_backend_fakenpu_reg());
@@ -604,6 +611,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
     ggml_backend_load_best("hexagon", silent, dir_path);
     ggml_backend_load_best("musa", silent, dir_path);
     ggml_backend_load_best("openvino", silent, dir_path);
+    ggml_backend_load_best("ane", silent, dir_path);
     ggml_backend_load_best("fakenpu", silent, dir_path);
     ggml_backend_load_best("cpu", silent, dir_path);
     // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend

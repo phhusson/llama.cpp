@@ -29,6 +29,8 @@ void             ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph 
 void ggml_metal_event_record(ggml_metal_t ctx, ggml_metal_event_t ev);
 void ggml_metal_event_wait  (ggml_metal_t ctx, ggml_metal_event_t ev);
 
+bool ggml_metal_fence_wait(ggml_metal_t ctx, ggml_backend_fence_t fence);
+
 ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx);
 
 void ggml_metal_set_n_cb            (ggml_metal_t ctx, int n_cb);
