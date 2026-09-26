@@ -40,12 +40,23 @@ embedding and other host-only tensors.
 - The Vulkan backend imports via `VK_EXT_external_memory_dma_buf` +
   `VK_KHR_external_memory_fd`, and resolves tensors through the same pointer
   lookup used for host-mapped tensors, on both UMA and non-UMA devices.
+- The ROCm backend imports file descriptors with `hipImportExternalMemory` and obtains device pointers with `hipExternalMemoryGetMappedBuffer`. Backend-local tensor descriptors retain the CPU mappings for other backends. HIP graph capture and kernel fusion remain available; the optional multi-stream graph optimizer is bypassed for graphs using DMA-BUF tensors.
 - The scheduler considers device defaults and extra buffer types when selecting shared activation storage supported by every producer and consumer.
 - The scheduler only inserts a copy between two backends when the target
   backend does not support the source buffer type, so a shared dma-buf tensor
   is used in place.
 
 ## Caveats
+
+### ROCm allocation and synchronization
+
+On Linux, KFD may reject DMA-BUFs from the system heap even when Vulkan can import them. Use the `amdgpu` allocator below to allocate CPU-mappable GTT memory through the AMDGPU driver. This is system memory, including on discrete GPUs; it does not allocate VRAM.
+
+ROCm import failures are fatal, as with Vulkan. Initialize the ROCm backend before allocating shared buffers so its importer receives allocation callbacks.
+
+ROCm does not export or import the backend's `sync_file` fences. HIP external-semaphore APIs are not supported on Linux, so the scheduler uses its existing producer-synchronization fallback at cross-backend dependencies. Importing memory alone does not establish execution ordering. Sharing writable state such as the KV cache still requires the cross-backend synchronization and alias handling described below.
+
+Quantized tensors whose row width is not a multiple of ROCm's matrix padding use the BLAS fallback, since shared allocations do not include ROCm-specific padding.
 
 ### Import failure is a hard error
 
@@ -118,6 +129,10 @@ Examples:
 ```sh
 # system heap (default)
 llama-cli -m model.gguf -dev Vulkan0 -ot 'blk\..*=DMA_BUF'
+
+# shared weights imported by ROCm
+GGML_DMABUF_HEAP=amdgpu GGML_DMABUF_AMDGPU_DEVICE=/dev/dri/renderD128 \
+    llama-cli -m model.gguf -dev ROCm0 -ot 'blk\..*=DMA_BUF'
 
 # device-local memory on an NVIDIA GPU
 GGML_DMABUF_HEAP=nvidia GGML_DMABUF_NVIDIA_DEVICE=/dev/dri/renderD129 \
