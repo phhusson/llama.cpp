@@ -11,6 +11,7 @@
 #import <Foundation/Foundation.h>
 
 #import <Metal/Metal.h>
+#include "ggml-apple-fence.h"
 
 #undef MIN
 #undef MAX
@@ -311,16 +312,6 @@ void ggml_metal_synchronize(ggml_metal_t ctx) {
     @autoreleasepool {
         [ctx->buf_refs removeAllObjects];
     }
-}
-
-static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_tensor * t) {
-    if (!t) {
-        return (struct ggml_metal_buffer_id) { nil, 0 };
-    }
-
-    ggml_backend_buffer_t buffer = t->view_src ? t->view_src->buffer : t->buffer;
-
-    return ggml_metal_buffer_get_id(buffer->context, t);
 }
 
 void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
@@ -699,6 +690,22 @@ void ggml_metal_event_wait(ggml_metal_t ctx, ggml_metal_event_t ev) {
 
         [cmd_buf retain];
     }
+}
+
+bool ggml_metal_fence_wait(ggml_metal_t ctx, ggml_backend_fence_t fence) {
+    if (fence->type != GGML_BACKEND_FENCE_METAL) {
+        return false;
+    }
+    @autoreleasepool {
+        struct ggml_apple_fence * ev = fence->context;
+        id<MTLCommandBuffer> cb = [(id<MTLCommandQueue>) ggml_metal_device_get_queue(ctx->dev) commandBuffer];
+        [cb encodeWaitForEvent:ev->event value:ev->value];
+        [cb commit];
+        [ctx->cmd_bufs_ext addObject:cb];
+        ctx->cmd_buf_last = cb;
+        [cb retain];
+    }
+    return true;
 }
 
 ggml_metal_event_t ggml_metal_get_ev_cpy(ggml_metal_t ctx) {

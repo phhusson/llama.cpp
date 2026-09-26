@@ -11,6 +11,7 @@
 #include <Metal/Metal.h>
 
 #include <stdatomic.h>
+#include "ggml-apple-fence.h"
 
 #ifndef TARGET_OS_VISION
 #define TARGET_OS_VISION 0
@@ -1447,8 +1448,12 @@ void ggml_metal_device_rsets_keep_alive(ggml_metal_device_t dev) {
 struct ggml_metal_event {
     void * obj; // id<MTLSharedEvent>
 
-    atomic_int value;
+    atomic_uint_fast64_t value;
 };
+
+ggml_backend_fence_t ggml_metal_event_export_fence(ggml_metal_event_t ev) {
+    return ggml_apple_fence_init(ev->obj, atomic_load_explicit(&ev->value, memory_order_relaxed));
+}
 
 void ggml_metal_event_encode_signal(ggml_metal_event_t ev, ggml_metal_cmd_buf_t cmd_buf_raw) {
     id<MTLSharedEvent> event = (id<MTLSharedEvent>)ev->obj;
