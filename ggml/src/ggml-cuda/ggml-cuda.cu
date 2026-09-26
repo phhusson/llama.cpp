@@ -5375,9 +5375,70 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
     return ggml_backend_cuda_host_buffer_type();
 }
 
+static int64_t get_op_batch_size(const ggml_tensor * op);
+
+#if defined(GGML_USE_HIP)
+static int64_t ggml_cuda_min_n_batch_size(const ggml_tensor * op) {
+    if (ggml_is_empty(op)) {
+        return 0;
+    }
+    switch (op->op) {
+        case GGML_OP_GET_ROWS:
+            return ggml_nelements(op->src[1]);
+        case GGML_OP_FLASH_ATTN_EXT:
+            return op->src[0]->ne[1] * op->src[0]->ne[3];
+        case GGML_OP_RESHAPE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_NORM:
+        case GGML_OP_RMS_NORM:
+        case GGML_OP_UNARY:
+        case GGML_OP_GLU:
+        case GGML_OP_SCALE:
+        case GGML_OP_CLAMP:
+        case GGML_OP_CPY:
+        case GGML_OP_CONT:
+        case GGML_OP_SET_ROWS:
+            return ggml_cuda_min_n_batch_size(op->src[0]);
+        case GGML_OP_ADD:
+        case GGML_OP_MUL:
+        case GGML_OP_SUB:
+        case GGML_OP_DIV:
+            // Follow the activation through head reshapes instead of counting heads as tokens.
+            if (ggml_are_same_shape(op, op->src[0])) {
+                return ggml_cuda_min_n_batch_size(op->src[0]);
+            }
+            return get_op_batch_size(op);
+        case GGML_OP_CONCAT:
+            return std::max(ggml_cuda_min_n_batch_size(op->src[0]), ggml_cuda_min_n_batch_size(op->src[1]));
+        default:
+            return get_op_batch_size(op);
+    }
+}
+#endif
+
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+
+#if defined(GGML_USE_HIP)
+    static const int min_n = getenv("GGML_ROCM_MIN_N") ? atoi(getenv("GGML_ROCM_MIN_N")) : 0;
+    if (min_n > 0) {
+        switch (op->op) {
+            case GGML_OP_NONE:
+            case GGML_OP_VIEW:
+            case GGML_OP_RESHAPE:
+            case GGML_OP_PERMUTE:
+            case GGML_OP_TRANSPOSE:
+                break;
+            default:
+                if (op->op == GGML_OP_GET_ROWS || ggml_cuda_min_n_batch_size(op) < min_n) {
+                    return false;
+                }
+        }
+    }
+#endif
 
     // check if all the sources are allocated on this device
     for (int i = 0; i < GGML_MAX_SRC; i++) {
