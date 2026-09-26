@@ -4,6 +4,7 @@
 #include "ggml-impl.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -11,7 +12,10 @@
 #include <vector>
 
 #if defined(__linux__)
+#include <errno.h>
+#include <fcntl.h>
 #include <linux/dma-buf.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #endif
@@ -20,8 +24,21 @@
 // - accepts only the DMA_BUF buffer type (no host pointer)
 // - claims MUL_MAT and delegates the work to an internal CPU backend
 // - runs the work on a worker thread with a configurable test latency
-//
-// Fences are not implemented yet.
+// - exports/waits on sync_file fences via sw_sync (required, no fallback)
+
+#if defined(__linux__)
+struct sw_sync_create_fence_data {
+    uint32_t value;
+    char name[32];
+    int32_t fence;
+};
+
+#define SW_SYNC_IOC_MAGIC 'W'
+#define SW_SYNC_IOC_CREATE_FENCE _IOWR(SW_SYNC_IOC_MAGIC, 0, struct sw_sync_create_fence_data)
+#define SW_SYNC_IOC_INC _IOW(SW_SYNC_IOC_MAGIC, 1, uint32_t)
+
+#define FAKENPU_SW_SYNC_PATH "/sys/kernel/debug/sync/sw_sync"
+#endif
 
 //
 // helpers
@@ -79,12 +96,80 @@ static void ggml_backend_fakenpu_buf_sync(const std::vector<int> & fds, bool sta
 // backend (stream)
 //
 
+struct ggml_backend_fakenpu_event {
+    int fd = -1; // owned sync_file, -1 if none
+};
+
 struct ggml_backend_fakenpu_context {
     ggml_backend_t cpu = nullptr;
 
     std::thread        worker;
     enum ggml_status   status = GGML_STATUS_SUCCESS;
+
+#if defined(__linux__)
+    int              pending_fence = -1; // sync_file for the running graph, moved to the event on record
+    std::vector<int> in_fences;          // sync_files to wait for before the next graph
+#endif
+    // stats
+    uint64_t t_poll_us = 0;
+    uint64_t t_bufsync_us = 0;
+    uint64_t t_compute_us = 0;
+    uint64_t n_graphs = 0;
 };
+
+static uint64_t fakenpu_now_us(void) {
+    return (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+//
+// fences (sw_sync)
+//
+
+#if defined(__linux__)
+// each graph gets its own sw_sync timeline, so the worker signals exactly the fence
+// that was exported for that graph, independent of ordering with other workers.
+// returns an owned sync_file fence (value 1) and outputs the timeline fd to signal it
+static int ggml_backend_fakenpu_sw_sync_fence_new(int * out_tl_fd) {
+    *out_tl_fd = -1;
+
+    const int tl_fd = open(FAKENPU_SW_SYNC_PATH, O_RDWR);
+    if (tl_fd < 0) {
+        GGML_LOG_ERROR("%s: cannot open %s\n", __func__, FAKENPU_SW_SYNC_PATH);
+        return -1;
+    }
+
+    struct sw_sync_create_fence_data data;
+    memset(&data, 0, sizeof(data));
+    data.value = 1;
+    snprintf(data.name, sizeof(data.name), "npu");
+    if (ioctl(tl_fd, SW_SYNC_IOC_CREATE_FENCE, &data) != 0) {
+        GGML_LOG_ERROR("%s: sw_sync CREATE_FENCE failed\n", __func__);
+        close(tl_fd);
+        return -1;
+    }
+
+    *out_tl_fd = tl_fd;
+    return data.fence;
+}
+
+static void ggml_backend_fakenpu_sw_sync_signal(int tl_fd) {
+    uint32_t inc = 1;
+    if (ioctl(tl_fd, SW_SYNC_IOC_INC, &inc) != 0) {
+        GGML_LOG_ERROR("%s: sw_sync INC failed\n", __func__);
+    }
+}
+
+static void ggml_backend_fakenpu_fence_poll(int fd) {
+    struct pollfd pfd = { fd, POLLIN, 0 };
+    while (poll(&pfd, 1, -1) < 0) {
+        if (errno != EINTR) {
+            GGML_LOG_ERROR("%s: poll() failed\n", __func__);
+            return;
+        }
+    }
+}
+#endif
 
 static ggml_guid_t ggml_backend_fakenpu_guid(void) {
     static ggml_guid guid = { 0x9d, 0x4b, 0x2f, 0x76, 0x18, 0xac, 0x43, 0xe1, 0x8a, 0x5d, 0x71, 0x0c, 0x36, 0xf9, 0xb2, 0x40 };
@@ -107,6 +192,20 @@ static void ggml_backend_fakenpu_free(ggml_backend_t backend) {
         ggml_backend_free(ctx->cpu);
     }
 
+#if defined(__linux__)
+    if (ctx->pending_fence >= 0) {
+        close(ctx->pending_fence);
+    }
+    for (int fd : ctx->in_fences) {
+        close(fd);
+    }
+#endif
+
+    if (getenv("GGML_FAKENPU_STATS") != NULL) {
+        fprintf(stderr, "[NPU stats] graphs=%llu poll=%.1fms bufsync=%.1fms compute=%.1fms\n",
+            (unsigned long long) ctx->n_graphs, ctx->t_poll_us / 1000.0, ctx->t_bufsync_us / 1000.0, ctx->t_compute_us / 1000.0);
+    }
+
     delete ctx;
     delete backend;
 }
@@ -118,7 +217,7 @@ static void ggml_backend_fakenpu_synchronize(ggml_backend_t backend) {
     }
 }
 
-static enum ggml_status ggml_backend_fakenpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+static enum ggml_status ggml_backend_fakenpu_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     ggml_backend_fakenpu_context * ctx = (ggml_backend_fakenpu_context *) backend->context;
 
     if (ctx->worker.joinable()) {
@@ -127,32 +226,134 @@ static enum ggml_status ggml_backend_fakenpu_graph_compute(ggml_backend_t backen
 
     const int64_t latency_us = ggml_backend_fakenpu_latency_us();
 
-    // no fences yet: run the work on a worker thread but wait for it before returning,
-    // the scheduler does not synchronize an async backend before a zero-copy read
+#if defined(__linux__)
+    // reserve a fence and its timeline for this graph, the worker signals exactly this one
+    if (ctx->pending_fence >= 0) {
+        close(ctx->pending_fence);
+    }
+    int tl_fd = -1;
+    ctx->pending_fence = ggml_backend_fakenpu_sw_sync_fence_new(&tl_fd);
+#endif
+
     ctx->status = GGML_STATUS_SUCCESS;
+#if defined(__linux__)
+    ctx->worker = std::thread([ctx, cgraph, latency_us, tl_fd]() {
+#else
     ctx->worker = std::thread([ctx, cgraph, latency_us]() {
+#endif
+        const uint64_t t0 = fakenpu_now_us();
+#if defined(__linux__)
+        // wait for the producers before touching the shared buffers
+        for (int fd : ctx->in_fences) {
+            ggml_backend_fakenpu_fence_poll(fd);
+            close(fd);
+        }
+        ctx->in_fences.clear();
+#endif
+        const uint64_t t1 = fakenpu_now_us();
+
+        if (latency_us > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(latency_us));
+        }
+
         std::vector<int> fds;
         ggml_backend_fakenpu_collect_graph_fds(cgraph, fds);
 
-        if (latency_us > 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds(latency_us));
-        }
-
-        // TODO: wait for incoming fences
-
+        const uint64_t tb0 = fakenpu_now_us();
         ggml_backend_fakenpu_buf_sync(fds, true);
+        const uint64_t tb1 = fakenpu_now_us();
         ctx->status = ggml_backend_graph_compute(ctx->cpu, cgraph);
+        const uint64_t t2 = fakenpu_now_us();
         ggml_backend_fakenpu_buf_sync(fds, false);
+        const uint64_t tb2 = fakenpu_now_us();
 
-        // TODO: signal outgoing fences
+        ctx->t_poll_us += t1 - t0;
+        ctx->t_bufsync_us += (tb1 - tb0) + (tb2 - t2);
+        ctx->t_compute_us += t2 - tb1;
+        ctx->n_graphs++;
 
         if (latency_us > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(latency_us));
         }
-    });
-    ctx->worker.join();
 
-    return ctx->status;
+#if defined(__linux__)
+        if (tl_fd >= 0) {
+            ggml_backend_fakenpu_sw_sync_signal(tl_fd);
+            close(tl_fd);
+        }
+#endif
+    });
+
+    return GGML_STATUS_SUCCESS;
+}
+
+static enum ggml_status ggml_backend_fakenpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    // async: the worker signals the graph fence when it is done
+    return ggml_backend_fakenpu_graph_compute_async(backend, cgraph);
+}
+
+static void ggml_backend_fakenpu_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_fakenpu_context * ctx = (ggml_backend_fakenpu_context *) backend->context;
+    ggml_backend_fakenpu_event * ev = (ggml_backend_fakenpu_event *) event->context;
+
+#if defined(__linux__)
+    if (ev->fd >= 0) {
+        close(ev->fd);
+    }
+    // take ownership of the fence for the last submitted graph
+    ev->fd = ctx->pending_fence;
+    ctx->pending_fence = -1;
+#else
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(ev);
+#endif
+}
+
+static void ggml_backend_fakenpu_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_fakenpu_event * ev = (ggml_backend_fakenpu_event *) event->context;
+
+#if defined(__linux__)
+    if (ev->fd >= 0) {
+        ggml_backend_fakenpu_fence_poll(ev->fd);
+    }
+#else
+    GGML_UNUSED(ev);
+#endif
+
+    GGML_UNUSED(backend);
+}
+
+static ggml_backend_fence_t ggml_backend_fakenpu_event_export_fence(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_fakenpu_event * ev = (ggml_backend_fakenpu_event *) event->context;
+
+#if defined(__linux__)
+    if (ev->fd >= 0) {
+        return ggml_backend_fence_init(dup(ev->fd));
+    }
+#else
+    GGML_UNUSED(ev);
+#endif
+
+    GGML_UNUSED(backend);
+    return NULL;
+}
+
+static bool ggml_backend_fakenpu_fence_wait(ggml_backend_t backend, ggml_backend_fence_t fence) {
+#if defined(__linux__)
+    ggml_backend_fakenpu_context * ctx = (ggml_backend_fakenpu_context *) backend->context;
+
+    const int fd = ggml_backend_fence_fd(fence);
+    if (fd < 0) {
+        return false;
+    }
+    // defer the wait to the worker so the host can keep scheduling
+    ctx->in_fences.push_back(dup(fd));
+    return true;
+#else
+    GGML_UNUSED(backend);
+    GGML_UNUSED(fence);
+    return false;
+#endif
 }
 
 static const struct ggml_backend_i ggml_backend_fakenpu_i = {
@@ -169,9 +370,11 @@ static const struct ggml_backend_i ggml_backend_fakenpu_i = {
     /* .graph_plan_update = */ NULL,
     /* .graph_plan_compute = */ NULL,
     /* .graph_compute     = */ ggml_backend_fakenpu_graph_compute,
-    /* .event_record      = */ NULL,
-    /* .event_wait        = */ NULL,
+    /* .event_record      = */ ggml_backend_fakenpu_event_record,
+    /* .event_wait        = */ ggml_backend_fakenpu_event_wait,
     /* .graph_optimize    = */ NULL,
+    /* .event_export_fence = */ ggml_backend_fakenpu_event_export_fence,
+    /* .fence_wait        = */ ggml_backend_fakenpu_fence_wait,
 };
 
 //
@@ -210,10 +413,10 @@ static void ggml_backend_fakenpu_device_get_props(ggml_backend_dev_t dev, struct
     props->device_id   = nullptr;
     ggml_backend_fakenpu_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->caps = {
-        /* .async                = */ false,
+        /* .async                = */ true,
         /* .host_buffer          = */ false,
         /* .buffer_from_host_ptr = */ false,
-        /* .events               = */ false,
+        /* .events               = */ true,
         /* .mmap_support         = */ true,
     };
 }
@@ -226,6 +429,18 @@ static ggml_backend_t ggml_backend_fakenpu_device_init_backend(ggml_backend_dev_
         delete ctx;
         return nullptr;
     }
+
+#if defined(__linux__)
+    // require sw_sync, probe that the node is usable
+    const int sw_probe = open(FAKENPU_SW_SYNC_PATH, O_RDWR);
+    if (sw_probe < 0) {
+        GGML_LOG_ERROR("%s: cannot open %s: %s\n", __func__, FAKENPU_SW_SYNC_PATH, strerror(errno));
+        ggml_backend_free(ctx->cpu);
+        delete ctx;
+        return nullptr;
+    }
+    close(sw_probe);
+#endif
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid    = */ ggml_backend_fakenpu_guid(),
@@ -268,6 +483,40 @@ static bool ggml_backend_fakenpu_device_supports_buft(ggml_backend_dev_t dev, gg
     GGML_UNUSED(dev);
 }
 
+static ggml_backend_event_t ggml_backend_fakenpu_device_event_new(ggml_backend_dev_t dev) {
+    ggml_backend_event_t event = new ggml_backend_event;
+    event->device  = dev;
+    event->context = new ggml_backend_fakenpu_event;
+    return event;
+}
+
+static void ggml_backend_fakenpu_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    ggml_backend_fakenpu_event * ev = (ggml_backend_fakenpu_event *) event->context;
+
+#if defined(__linux__)
+    if (ev->fd >= 0) {
+        close(ev->fd);
+    }
+#endif
+
+    delete ev;
+    delete event;
+
+    GGML_UNUSED(dev);
+}
+
+static void ggml_backend_fakenpu_device_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event) {
+    ggml_backend_fakenpu_event * ev = (ggml_backend_fakenpu_event *) event->context;
+
+#if defined(__linux__)
+    if (ev->fd >= 0) {
+        ggml_backend_fakenpu_fence_poll(ev->fd);
+    }
+#endif
+
+    GGML_UNUSED(dev);
+}
+
 static const struct ggml_backend_device_i ggml_backend_fakenpu_device_i = {
     /* .get_name             = */ ggml_backend_fakenpu_device_get_name,
     /* .get_description      = */ ggml_backend_fakenpu_device_get_description,
@@ -281,9 +530,9 @@ static const struct ggml_backend_device_i ggml_backend_fakenpu_device_i = {
     /* .supports_op          = */ ggml_backend_fakenpu_device_supports_op,
     /* .supports_buft        = */ ggml_backend_fakenpu_device_supports_buft,
     /* .offload_op           = */ NULL,
-    /* .event_new            = */ NULL,
-    /* .event_free           = */ NULL,
-    /* .event_synchronize    = */ NULL,
+    /* .event_new            = */ ggml_backend_fakenpu_device_event_new,
+    /* .event_free           = */ ggml_backend_fakenpu_device_event_free,
+    /* .event_synchronize    = */ ggml_backend_fakenpu_device_event_synchronize,
 };
 
 //
