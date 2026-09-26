@@ -700,6 +700,8 @@ struct vk_device_struct {
     bool external_memory_host {};
     bool external_memory_fd {};
     bool external_memory_dma_buf {};
+    bool external_fence_fd {};
+    bool external_semaphore_fd {};
     bool fp16;
     bool bf16;
     bool pipeline_robustness;
@@ -1105,6 +1107,10 @@ struct vk_event {
     vk::Event event;
     bool has_event;
 
+    // optional host fence, submitted alongside the event, used to export a sync_file
+    vk::Fence fence;
+    bool has_fence = false;
+
     vk_semaphore tl_semaphore;
     vk_command_buffer* cmd_buffer = nullptr;
     uint64_t cmd_buffer_use_counter = 0;
@@ -1285,6 +1291,11 @@ struct ggml_backend_vk_context {
     vk_context_ref transfer_ctx;
     vk_semaphore transfer_semaphore;
     uint64_t transfer_semaphore_last_submitted {};
+
+    // binary semaphores imported from external fences. pending ones are added as wait
+    // semaphores to the first compute submission, inflight ones are destroyed on synchronize
+    std::vector<vk::Semaphore> fence_pending_semaphores;
+    std::vector<vk::Semaphore> fence_inflight_semaphores;
 
     std::vector<vk_context_ref> tensor_ctxs;
 

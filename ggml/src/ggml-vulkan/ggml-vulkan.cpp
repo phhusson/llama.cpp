@@ -1,6 +1,10 @@
 #include "ggml-vulkan-common.h"
 #include "ggml-dmabuf.h"
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
+
 namespace {
 inline std::ostream & operator<<(std::ostream & os, vk::Buffer buffer) {
     return os << static_cast<VkBuffer>(buffer);
@@ -4155,6 +4159,10 @@ vk_device ggml_vk_get_device(size_t idx) {
                 device->external_memory_fd = true;
             } else if (strcmp("VK_EXT_external_memory_dma_buf", properties.extensionName) == 0) {
                 device->external_memory_dma_buf = true;
+            } else if (strcmp("VK_KHR_external_fence_fd", properties.extensionName) == 0) {
+                device->external_fence_fd = true;
+            } else if (strcmp("VK_KHR_external_semaphore_fd", properties.extensionName) == 0) {
+                device->external_semaphore_fd = true;
 #if defined(VK_EXT_shader_64bit_indexing)
             } else if (strcmp("VK_EXT_shader_64bit_indexing", properties.extensionName) == 0) {
                 device->shader_64b_indexing = true;
@@ -4511,6 +4519,16 @@ vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_KHR_external_memory");
             device_extensions.push_back("VK_KHR_external_memory_fd");
             device_extensions.push_back("VK_EXT_external_memory_dma_buf");
+        }
+
+        if (device->external_fence_fd) {
+            device_extensions.push_back("VK_KHR_external_fence");
+            device_extensions.push_back("VK_KHR_external_fence_fd");
+        }
+
+        if (device->external_semaphore_fd) {
+            device_extensions.push_back("VK_KHR_external_semaphore");
+            device_extensions.push_back("VK_KHR_external_semaphore_fd");
         }
 
 #if defined(VK_EXT_shader_64bit_indexing)
@@ -13477,6 +13495,15 @@ static void ggml_backend_vk_synchronize(ggml_backend_t backend) {
 
     ggml_vk_synchronize(ctx);
 
+    for (vk::Semaphore sem : ctx->fence_pending_semaphores) {
+        ctx->device->device.destroySemaphore(sem);
+    }
+    for (vk::Semaphore sem : ctx->fence_inflight_semaphores) {
+        ctx->device->device.destroySemaphore(sem);
+    }
+    ctx->fence_pending_semaphores.clear();
+    ctx->fence_inflight_semaphores.clear();
+
     ggml_vk_graph_cleanup(ctx);
 }
 
@@ -14295,6 +14322,16 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         // initialize partial sums to zero.
         ggml_vk_buffer_memset_async(compute_ctx, ctx->prealloc_add_rms_partials, 0, 0, ctx->prealloc_size_add_rms_partials);
         ggml_vk_sync_buffers(ctx, compute_ctx);
+    }
+
+    // add waits for external fences to the first compute submission
+    if (!ctx->fence_pending_semaphores.empty()) {
+        compute_ctx = ggml_vk_get_compute_ctx(ctx);
+        for (vk::Semaphore sem : ctx->fence_pending_semaphores) {
+            compute_ctx->s->wait_semaphores.push_back({ sem, 0 });
+            ctx->fence_inflight_semaphores.push_back(sem);
+        }
+        ctx->fence_pending_semaphores.clear();
     }
 
     // Submit after enough work has accumulated, to overlap CPU cmdbuffer generation with GPU execution.
@@ -15141,7 +15178,22 @@ static void ggml_backend_vk_event_record(ggml_backend_t backend, ggml_backend_ev
     compute_ctx->s->signal_semaphores.push_back(vkev->tl_semaphore);
     ggml_vk_ctx_end(compute_ctx);
 
-    ggml_vk_submit(compute_ctx, {});
+    // submit a host fence alongside the event so we can export a sync_file for it
+    vk::Fence fence = {};
+    if (ctx->device->external_fence_fd) {
+        if (vkev->has_fence) {
+            ctx->device->device.destroyFence(vkev->fence);
+        }
+        vk::ExportFenceCreateInfo export_info;
+        export_info.handleTypes = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+        vk::FenceCreateInfo fence_info;
+        fence_info.pNext = &export_info;
+        vkev->fence = ctx->device->device.createFence(fence_info);
+        vkev->has_fence = true;
+        fence = vkev->fence;
+    }
+
+    ggml_vk_submit(compute_ctx, fence);
     ctx->submit_pending = true;
     vkev->cmd_buffer = cmd_buf;
     vkev->cmd_buffer_use_counter = cmd_buf->use_counter;
@@ -15166,6 +15218,92 @@ static void ggml_backend_vk_event_wait(ggml_backend_t backend, ggml_backend_even
     }
 }
 
+static ggml_backend_fence_t ggml_backend_vk_event_export_fence(ggml_backend_t backend, ggml_backend_event_t event) {
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *) backend->context;
+    vk_event * vkev = (vk_event *) event->context;
+
+    if (!ctx->device->external_fence_fd || !vkev->has_fence) {
+        return NULL;
+    }
+
+    vk::FenceGetFdInfoKHR info;
+    info.fence = vkev->fence;
+    info.handleType = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+
+    int fd = -1;
+    try {
+        fd = ctx->device->device.getFenceFdKHR(info);
+    } catch (const vk::SystemError &) {
+        fd = -1;
+    }
+
+    // exporting a SYNC_FD fence consumes it, it cannot be reused
+    ctx->device->device.destroyFence(vkev->fence);
+    vkev->fence = vk::Fence();
+    vkev->has_fence = false;
+
+    return fd >= 0 ? ggml_backend_fence_init(fd) : NULL;
+}
+
+static bool ggml_backend_vk_fence_wait(ggml_backend_t backend, ggml_backend_fence_t fence) {
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *) backend->context;
+
+    const int fd = ggml_backend_fence_fd(fence);
+    if (fd < 0) {
+        return false;
+    }
+
+    // async by default: import into a temporary binary semaphore and wait on the compute
+    // queue. GGML_VK_DISABLE_ASYNC_FENCE falls back to a host wait, which is safe everywhere
+    // but blocks the host thread until the producer signals.
+    if (getenv("GGML_VK_DISABLE_ASYNC_FENCE") == NULL && ctx->device->external_semaphore_fd) {
+        try {
+            vk::SemaphoreCreateInfo sem_info;
+            vk::Semaphore sem = ctx->device->device.createSemaphore(sem_info);
+
+            vk::ImportSemaphoreFdInfoKHR import_info;
+            import_info.semaphore = sem;
+            import_info.flags = vk::SemaphoreImportFlagBits::eTemporary;
+            import_info.handleType = vk::ExternalSemaphoreHandleTypeFlagBits::eSyncFd;
+            import_info.fd = dup(fd); // import consumes the fd, keep ours
+
+            ctx->device->device.importSemaphoreFdKHR(import_info);
+
+            // added to the first compute submission of the next graph
+            ctx->fence_pending_semaphores.push_back(sem);
+        } catch (const vk::SystemError &) {
+            return false;
+        }
+        return true;
+    }
+
+    if (!ctx->device->external_fence_fd) {
+        return false;
+    }
+
+    vk::ExportFenceCreateInfo export_info;
+    export_info.handleTypes = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+    vk::FenceCreateInfo fence_info;
+    fence_info.pNext = &export_info;
+
+    try {
+        vk::Fence vk_fence = ctx->device->device.createFence(fence_info);
+
+        vk::ImportFenceFdInfoKHR import_info;
+        import_info.fence = vk_fence;
+        import_info.handleType = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+        import_info.fd = dup(fd); // import consumes the fd, keep ours
+
+        ctx->device->device.importFenceFdKHR(import_info);
+        ctx->device->device.waitForFences(vk_fence, VK_TRUE, UINT64_MAX);
+        ctx->device->device.destroyFence(vk_fence);
+    } catch (const vk::SystemError &) {
+        return false;
+    }
+
+    return true;
+}
+
 static ggml_backend_i ggml_backend_vk_interface = {
     /* .get_name                = */ ggml_backend_vk_name,
     /* .free                    = */ ggml_backend_vk_free,
@@ -15183,6 +15321,8 @@ static ggml_backend_i ggml_backend_vk_interface = {
     /* .event_record            = */ ggml_backend_vk_event_record,
     /* .event_wait              = */ ggml_backend_vk_event_wait,
     /* .graph_optimize          = */ ggml_vk_graph_optimize,
+    /* .event_export_fence      = */ ggml_backend_vk_event_export_fence,
+    /* .fence_wait              = */ ggml_backend_vk_fence_wait,
 };
 
 static ggml_guid_t ggml_backend_vk_guid() {
@@ -16083,6 +16223,9 @@ static void ggml_backend_vk_device_event_free(ggml_backend_dev_t dev, ggml_backe
     }
     if (vkev->has_event) {
         device->device.destroyEvent(vkev->event);
+    }
+    if (vkev->has_fence) {
+        device->device.destroyFence(vkev->fence);
     }
     delete vkev;
     delete event;
