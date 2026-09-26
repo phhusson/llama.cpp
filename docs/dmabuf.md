@@ -19,8 +19,7 @@ This builds DMA-BUF allocation support into `ggml-base`. Backends that import DM
 
 ## Usage
 
-The buffer type is not selected automatically. It is exposed as an extra buffer
-type and can be requested with tensor buffer overrides:
+By default, the buffer type is exposed as an extra buffer type and can be requested with tensor buffer overrides:
 
 ```sh
 llama-cli -m model.gguf -dev Vulkan0 -ot '.*=DMA_BUF'
@@ -54,7 +53,7 @@ On Linux, KFD may reject DMA-BUFs from the system heap even when Vulkan can impo
 
 ROCm import failures are fatal, as with Vulkan. Initialize the ROCm backend before allocating shared buffers so its importer receives allocation callbacks.
 
-ROCm does not export or import the backend's `sync_file` fences. HIP external-semaphore APIs are not supported on Linux, so the scheduler uses its existing producer-synchronization fallback at cross-backend dependencies. Importing memory alone does not establish execution ordering. Sharing writable state such as the KV cache still requires the cross-backend synchronization and alias handling described below.
+ROCm does not export or import the backend's `sync_file` fences. HIP external-semaphore APIs are not supported on Linux, so the scheduler uses its existing producer-synchronization fallback at cross-backend dependencies. Importing memory alone does not establish execution ordering. Vulkan overlap checks also track shared buffers for writable tensors such as activations and the KV cache.
 
 Quantized tensors whose row width is not a multiple of ROCm's matrix padding use the BLAS fallback, since shared allocations do not include ROCm-specific padding.
 
@@ -69,14 +68,11 @@ failure would leave an op assigned to a backend that cannot resolve the tensor.
 If a device with the extensions is present but unused, a failed import still
 aborts. Treat a dma-buf import failure as a configuration/driver problem.
 
-### Shared tensors are assumed read-only
+### Shared default buffers
 
-The Vulkan graph sync and fusion overlap checks treat buffers that are not
-Vulkan-owned as non-overlapping. This is correct for tensors that are only read
-during graph execution (weights), which is the intended use. It is not correct
-for dma-buf tensors that are written as part of the graph (activations). Do not
-use the dma-buf buffer type for graph-computed tensors until the overlap/sync
-logic understands cross-backend buffers.
+`GGML_DMABUFT=1` makes DMA-BUF the default buffer type for ROCm and Vulkan. This includes compute buffers and persistent KV/recurrent state, so both backends can use the same state when graph placement changes. Explicit native buffer-type APIs keep their existing behavior. Both backends must support importing the selected allocator's buffers. The option is disabled by default and read once per process.
+
+Shared allocations avoid copies but do not remove cross-backend synchronization costs. Vulkan quantized views still have layout restrictions: a misaligned Q4_0 view can assert, and sliced MoE expert weights can produce incorrect results even with native output buffers. Contiguous expert weights passed the shared-buffer checks.
 
 ### `-ot` bypasses the load-time support check
 
