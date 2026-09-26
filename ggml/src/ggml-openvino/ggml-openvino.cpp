@@ -818,6 +818,8 @@ static const ggml_backend_i ggml_backend_openvino_interface = {
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ NULL,
+    /* .event_export_fence      = */ NULL,
+    /* .fence_wait              = */ NULL,
 };
 
 int ggml_backend_openvino_get_device_count() {

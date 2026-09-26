@@ -466,6 +466,8 @@ static ggml_backend_i ggml_backend_zdnn_i = {
     /* .event_record           = */ NULL,
     /* .event_wait             = */ NULL,
     /* .graph_optimize         = */ NULL,
+    /* .event_export_fence      = */ NULL,
+    /* .fence_wait              = */ NULL,
 };
 
 static ggml_guid_t ggml_backend_zdnn_guid(void) {

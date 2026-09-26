@@ -28,6 +28,13 @@
 #include <sys/sysctl.h>
 #endif
 
+#ifdef __linux__
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
 
 // backend buffer type
 
@@ -567,6 +574,75 @@ void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event)
     backend->iface.event_wait(backend, event);
 }
 
+// fences
+
+ggml_backend_fence_t ggml_backend_fence_init(int fd) {
+    ggml_backend_fence_t fence = (ggml_backend_fence_t) malloc(sizeof(struct ggml_backend_fence));
+    GGML_ASSERT(fence != NULL);
+    fence->fd = fd;
+    return fence;
+}
+
+ggml_backend_fence_t ggml_backend_event_export_fence(ggml_backend_t backend, ggml_backend_event_t event) {
+    GGML_ASSERT(backend);
+    if (backend->iface.event_export_fence == NULL) {
+        return NULL;
+    }
+    return backend->iface.event_export_fence(backend, event);
+}
+
+bool ggml_backend_fence_wait(ggml_backend_t backend, ggml_backend_fence_t fence) {
+    GGML_ASSERT(backend);
+    if (fence == NULL || backend->iface.fence_wait == NULL) {
+        return false;
+    }
+    return backend->iface.fence_wait(backend, fence);
+}
+
+int ggml_backend_fence_fd(ggml_backend_fence_t fence) {
+    return fence ? fence->fd : -1;
+}
+
+ggml_backend_fence_t ggml_backend_fence_dup(ggml_backend_fence_t fence) {
+    if (fence == NULL) {
+        return NULL;
+    }
+#if defined(__linux__)
+    const int fd = fence->fd >= 0 ? dup(fence->fd) : -1;
+#else
+    const int fd = -1;
+#endif
+    return ggml_backend_fence_init(fd);
+}
+
+void ggml_backend_fence_free(ggml_backend_fence_t fence) {
+    if (fence == NULL) {
+        return;
+    }
+#if defined(__linux__)
+    if (fence->fd >= 0) {
+        close(fence->fd);
+    }
+#endif
+    free(fence);
+}
+
+void ggml_backend_fence_sync(ggml_backend_fence_t fence) {
+    if (fence == NULL || fence->fd < 0) {
+        return;
+    }
+#if defined(__linux__)
+    struct pollfd pfd = { fence->fd, POLLIN, 0 };
+    while (poll(&pfd, 1, -1) < 0) {
+        if (errno != EINTR) {
+            GGML_ABORT("poll() failed for fence fd %d", fence->fd);
+        }
+    }
+#else
+    GGML_ABORT("fences are not supported on this platform");
+#endif
+}
+
 static void ggml_backend_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * cgraph, struct ggml_backend_graph_optimize_params * params) {
     GGML_ASSERT(backend);
     if (backend->iface.graph_optimize != NULL) {
@@ -779,6 +855,11 @@ struct ggml_backend_sched_split {
     struct ggml_tensor ** inputs;
     int n_inputs;
     int inputs_capacity;
+    // splits whose buffers this split reads directly (zero-copy), the consumer waits on their fences
+    int fence_producers[GGML_SCHED_MAX_BACKENDS];
+    int n_fence_producers;
+    // event recorded after this split, used to export a fence for it
+    ggml_backend_event_t fence_event;
     // graph view of this split
     struct ggml_cgraph graph;
 };
@@ -1297,6 +1378,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
     // pass 5: split graph, find tensors that need to be copied
     {
         int i_split = 0;
+        // most recent split on each backend, used to find the producer of a zero-copy input
+        int last_split_for_backend[GGML_SCHED_MAX_BACKENDS];
+        for (int b = 0; b < sched->n_backends; b++) {
+            last_split_for_backend[b] = -1;
+        }
         struct ggml_backend_sched_split * split = &sched->splits[0];
         // find the backend of the first split, skipping view ops
         int i = 0;
@@ -1309,7 +1395,9 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
         split->i_start = 0;
         split->n_inputs = 0;
+        split->n_fence_producers = 0;
         int cur_backend_id = split->backend_id;
+        last_split_for_backend[cur_backend_id] = 0;
         for (; i < graph->n_nodes; i++) {
             struct ggml_tensor * node = graph->nodes[i];
 
@@ -1358,7 +1446,9 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                 split->backend_id = node_backend_id;
                 split->i_start = i;
                 split->n_inputs = 0;
+                split->n_fence_producers = 0;
                 cur_backend_id = node_backend_id;
+                last_split_for_backend[cur_backend_id] = i_split;
             }
 
             // find inputs that are not on the same backend
@@ -1393,6 +1483,22 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                         split->inputs[n_inputs] = src;
                     }
                     node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
+                } else if (src_backend_id != cur_backend_id) {
+                    // zero-copy input from another backend: wait on the fence of the split that produced it
+                    const int producer_split = last_split_for_backend[src_backend_id];
+                    if (producer_split < 0) {
+                        continue;
+                    }
+                    bool seen = false;
+                    for (int k = 0; k < split->n_fence_producers; k++) {
+                        if (split->fence_producers[k] == producer_split) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen && split->n_fence_producers < GGML_SCHED_MAX_BACKENDS) {
+                        split->fence_producers[split->n_fence_producers++] = producer_split;
+                    }
                 }
             }
         }
@@ -1669,19 +1775,37 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
     int prev_backend_id = -1;
 
+    // wait for the fence of a split that produced data this split reads, or synchronize as a fallback
+    auto wait_split_fence = [&](int consumer_backend_id, int producer_split_id) {
+        struct ggml_backend_sched_split * ps = &splits[producer_split_id];
+        ggml_backend_t producer = sched->backends[ps->backend_id];
+        ggml_backend_fence_t fence = ps->fence_event != NULL
+            ? ggml_backend_event_export_fence(producer, ps->fence_event)
+            : NULL;
+        if (fence == NULL || !ggml_backend_fence_wait(sched->backends[consumer_backend_id], fence)) {
+            ggml_backend_synchronize(producer);
+        }
+        ggml_backend_fence_free(fence);
+    };
+
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
         struct ggml_backend_sched_split * split = &splits[split_id];
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
+        // create an event for this split, tied to the backend device
+        if (split->fence_event != NULL && split->fence_event->device != split_backend->device) {
+            ggml_backend_event_free(split->fence_event);
+            split->fence_event = NULL;
+        }
+        if (split->fence_event == NULL) {
+            split->fence_event = ggml_backend_event_new(split_backend->device);
+        }
+
         // ensure the previous split's async work has completed before we start
         // this split, the allocator may have reused buffer regions across splits
         if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
-            if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
-                ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
-            } else {
-                ggml_backend_synchronize(sched->backends[prev_backend_id]);
-            }
+            wait_split_fence(split_backend_id, split_id - 1);
         }
 
         // copy the input tensors to the split backend
@@ -1811,6 +1935,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        // wait for the fences of the splits whose buffers this split reads directly
+        for (int k = 0; k < split->n_fence_producers; k++) {
+            wait_split_fence(split_backend_id, split->fence_producers[k]);
+        }
+
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
@@ -1853,6 +1982,9 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         // record the event of this split
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
+        }
+        if (split->fence_event != NULL) {
+            ggml_backend_event_record(split->fence_event, split_backend);
         }
 
         prev_backend_id = split_backend_id;
@@ -1946,6 +2078,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     ggml_free(sched->ctx);
     ggml_hash_set_free(&sched->hash_set);
     for (int i = 0; i < sched->splits_capacity; i++) {
+        ggml_backend_event_free(sched->splits[i].fence_event);
         free(sched->splits[i].inputs);
     }
     free(sched->splits);

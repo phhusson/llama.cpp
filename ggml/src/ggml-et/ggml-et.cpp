@@ -1611,6 +1611,8 @@ static const struct ggml_backend_i ggml_backend_et_i = {
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ NULL,
+    /* .event_export_fence      = */ NULL,
+    /* .fence_wait              = */ NULL,
 };
 
 static const char * ggml_backend_et_device_get_name(ggml_backend_dev_t dev) {

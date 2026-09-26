@@ -24,6 +24,7 @@ extern "C" {
     typedef struct ggml_backend_buffer_type * ggml_backend_buffer_type_t;
     typedef struct ggml_backend_buffer * ggml_backend_buffer_t;
     typedef struct ggml_backend_event * ggml_backend_event_t;
+    typedef struct ggml_backend_fence * ggml_backend_fence_t;
     typedef struct ggml_backend * ggml_backend_t;
     typedef void * ggml_backend_graph_plan_t;
     typedef struct ggml_backend_reg * ggml_backend_reg_t;
@@ -126,6 +127,26 @@ extern "C" {
     GGML_API void                 ggml_backend_event_record(ggml_backend_event_t event, ggml_backend_t backend);
     GGML_API void                 ggml_backend_event_synchronize(ggml_backend_event_t event);
     GGML_API void                 ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event);
+
+    //
+    // Fences
+    //
+    // A portable completion signal used to order work between backends that share
+    // memory, without a full synchronize. Backed by a sync_file fd, which another
+    // backend can import or the host can poll. A fence only means "all work
+    // submitted before the record is done", not anything about the memory itself.
+
+    // export the completion of an event as a fence, or NULL if not supported
+    GGML_API ggml_backend_fence_t ggml_backend_event_export_fence(ggml_backend_t backend, ggml_backend_event_t event);
+    // make subsequent work on backend wait for fence, returns false if not supported
+    GGML_API bool                 ggml_backend_fence_wait(ggml_backend_t backend, ggml_backend_fence_t fence);
+    // wait for fence on the host
+    GGML_API void                 ggml_backend_fence_sync(ggml_backend_fence_t fence);
+    // duplicate a fence for an additional consumer
+    GGML_API ggml_backend_fence_t ggml_backend_fence_dup (ggml_backend_fence_t fence);
+    GGML_API void                 ggml_backend_fence_free(ggml_backend_fence_t fence);
+    // borrowed fd, for poll or external use, not owned by the caller
+    GGML_API int                  ggml_backend_fence_fd  (ggml_backend_fence_t fence);
 
     //
     // Backend device

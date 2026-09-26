@@ -153,6 +153,11 @@ extern "C" {
 
         // (optional) sort/optimize the nodes in the graph
         void                      (*graph_optimize)    (ggml_backend_t backend, struct ggml_cgraph * cgraph, struct ggml_backend_graph_optimize_params * params);
+
+        // (optional) export a portable fence that signals when `event` completes
+        ggml_backend_fence_t      (*event_export_fence)(ggml_backend_t backend, ggml_backend_event_t event);
+        // (optional) make subsequent work on this backend wait for `fence`, return false if unsupported
+        bool                      (*fence_wait)        (ggml_backend_t backend, ggml_backend_fence_t fence);
     };
 
     struct ggml_backend {
@@ -166,6 +171,13 @@ extern "C" {
         struct ggml_backend_device * device;
         void * context;
     };
+
+    struct ggml_backend_fence {
+        int fd; // owned sync_file fd, -1 if none
+    };
+
+    // create a fence from an owned fd, used by backends implementing event_export_fence
+    GGML_API ggml_backend_fence_t ggml_backend_fence_init(int fd);
 
     //
     // Backend device

@@ -9320,6 +9320,8 @@ static ggml_backend_i ggml_backend_opencl_i = {
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ NULL,
+    /* .event_export_fence      = */ NULL,
+    /* .fence_wait              = */ NULL,
 };
 
 ggml_backend_t ggml_backend_opencl_init(void) {

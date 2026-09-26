@@ -3707,6 +3707,8 @@ static ggml_backend_i ggml_backend_webgpu_i = {
     /* .event_record            = */ ggml_backend_webgpu_event_record,
     /* .event_wait              = */ ggml_backend_webgpu_event_wait,
     /* .graph_optimize          = */ NULL,
+    /* .event_export_fence      = */ NULL,
+    /* .fence_wait              = */ NULL,
 };
 
 /* End GGML Backend Interface */
