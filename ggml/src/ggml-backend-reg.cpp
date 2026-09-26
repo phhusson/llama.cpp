@@ -91,6 +91,10 @@
 #endif
 
 
+#ifdef GGML_USE_FAKENPU
+#include "ggml-fakenpu.h"
+#endif
+
 namespace fs = std::filesystem;
 
 static std::string path_str(const fs::path & path) {
@@ -171,6 +175,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_CPU
         register_backend(ggml_backend_cpu_reg());
+#endif
+#ifdef GGML_USE_FAKENPU
+        register_backend(ggml_backend_fakenpu_reg());
 #endif
     }
 
@@ -597,6 +604,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
     ggml_backend_load_best("hexagon", silent, dir_path);
     ggml_backend_load_best("musa", silent, dir_path);
     ggml_backend_load_best("openvino", silent, dir_path);
+    ggml_backend_load_best("fakenpu", silent, dir_path);
     ggml_backend_load_best("cpu", silent, dir_path);
     // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend
     const char * backend_path = std::getenv("GGML_BACKEND_PATH");
