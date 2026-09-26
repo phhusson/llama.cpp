@@ -276,8 +276,22 @@ static GGMLANEModel * ane_model(struct ane_context * ctx, int64_t k, int64_t m, 
         "        bool no = const()[name = string(\"no\"), val = bool(false)];\n"
         "        bool yes = const()[name = string(\"yes\"), val = bool(true)];\n", n, k, m, k];
 
-    [mil appendFormat:@"        tensor<fp16,[1,1,%lld,%lld]> y = matmul(x = a, y = w, transpose_x = no, transpose_y = yes)[name = string(\"matmul\")];\n", n, m];
-    [mil appendString:@"    } -> (y);\n}\n"];
+    // Compute W * A^T with smaller reductions; Metal transposes the output.
+    const int64_t chunk = 2048;
+    for (int64_t first = 0, i = 0; first < k; first += chunk, ++i) {
+        int64_t count = MIN(chunk, k - first);
+        [mil appendFormat:@"        tensor<int32,[4]> b%lld = const()[name = string(\"b%lld\"), val = tensor<int32,[4]>([0,0,0,%lld])];\n", i, i, first];
+        [mil appendFormat:@"        tensor<int32,[4]> sa%lld = const()[name = string(\"sa%lld\"), val = tensor<int32,[4]>([1,1,%lld,%lld])];\n", i, i, n, count];
+        [mil appendFormat:@"        tensor<int32,[4]> sw%lld = const()[name = string(\"sw%lld\"), val = tensor<int32,[4]>([1,1,%lld,%lld])];\n", i, i, m, count];
+        [mil appendFormat:@"        tensor<fp16,[1,1,%lld,%lld]> a%lld = slice_by_size(x = a, begin = b%lld, size = sa%lld)[name = string(\"a%lld\")];\n", n, count, i, i, i, i];
+        [mil appendFormat:@"        tensor<fp16,[1,1,%lld,%lld]> w%lld = slice_by_size(x = w, begin = b%lld, size = sw%lld)[name = string(\"w%lld\")];\n", m, count, i, i, i, i];
+        [mil appendFormat:@"        tensor<fp16,[1,1,%lld,%lld]> p%lld = matmul(x = w%lld, y = a%lld, transpose_x = no, transpose_y = yes)[name = string(\"p%lld\")];\n", m, n, i, i, i, i];
+        if (i) {
+            [mil appendFormat:@"        tensor<fp16,[1,1,%lld,%lld]> r%lld = add(x = %@%lld, y = p%lld)[name = string(\"r%lld\")];\n", m, n, i, i == 1 ? @"p" : @"r", i - 1, i, i];
+        }
+    }
+    int64_t last = (k - 1)/chunk;
+    [mil appendFormat:@"    } -> (%@%lld);\n}\n", last ? @"r" : @"p", last];
 
     NSData * data = [mil dataUsingEncoding:NSUTF8StringEncoding];
     NSData * dummy = [NSData dataWithBytes:"\0\0\0\0" length:4];
@@ -380,7 +394,7 @@ static void ane_encode_convert(struct ane_context * ctx, id<MTLCommandBuffer> cb
     if (output) {
         const uint32_t shape[] = { (uint32_t) tensor->ne[0], (uint32_t) tensor->ne[1] };
         [enc setBytes:shape length:sizeof(shape) atIndex:2];
-        [enc dispatchThreads:MTLSizeMake(ggml_nelements(tensor), 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc dispatchThreadgroups:MTLSizeMake(tensor->ne[1]/16, tensor->ne[0]/16, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     } else {
         const uint32_t shape[] = { (uint32_t) tensor->ne[0], tensor->type == GGML_TYPE_F16 };
         [enc setBytes:shape length:sizeof(shape) atIndex:2];
@@ -639,13 +653,17 @@ static ggml_backend_t ane_init(ggml_backend_dev_t dev, const char * params) {
             "    }\n"
             "}\n"
             "\n"
-            "// Remove each token's scale from the [N,M] output; shape contains M and N.\n"
+            "// Transpose [M,N] to [N,M] and remove each token's scale; shape contains M and N.\n"
             "kernel void convert(device float * y [[buffer(0)]],\n"
             "                    device const half * x [[buffer(1)]],\n"
             "                    constant uint2 & shape [[buffer(2)]],\n"
             "                    device const float * scales [[buffer(3)]],\n"
-            "                    uint i [[thread_position_in_grid]]) {\n"
-            "    y[i] = float(x[i])/scales[i/shape.x];\n"
+            "                    uint2 t [[thread_position_in_threadgroup]],\n"
+            "                    uint2 g [[threadgroup_position_in_grid]]) {\n"
+            "    threadgroup half tile[16][17];\n"
+            "    tile[t.y][t.x] = x[(g.y*16 + t.y)*shape.y + g.x*16 + t.x];\n"
+            "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+            "    y[(g.x*16 + t.y)*shape.x + g.y*16 + t.x] = float(tile[t.x][t.y])/scales[g.x*16 + t.y];\n"
             "}\n";
 
         NSError * error = nil;
