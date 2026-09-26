@@ -109,6 +109,8 @@ platform/vendor-specific part of this buffer type.
   NVIDIA allocator instead.
 - `GGML_DMABUF_NVIDIA_DEVICE`: DRM render node used by the NVIDIA allocator,
   for example `/dev/dri/renderD129`. Required when `GGML_DMABUF_HEAP=nvidia`.
+- `GGML_DMABUF_HEAP=amdgpu`: allocate an AMDGPU GTT buffer and export it as a DMA-BUF. Requires `drm/amdgpu_drm.h` at build time.
+- `GGML_DMABUF_AMDGPU_DEVICE`: AMDGPU DRM render node, for example `/dev/dri/renderD128`. Required when `GGML_DMABUF_HEAP=amdgpu`.
 
 Examples:
 
