@@ -5,6 +5,7 @@
 #include "ggml.h"
 
 #include <algorithm>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -19,9 +20,12 @@ struct dummy_backend_context {
     size_t alignment       = 8;
 
     ggml_backend_buffer_i              buffer_interface;
+    ggml_backend_reg                   reg;
     ggml_backend_device                device;
     ggml_backend                       backend;
     std::vector<ggml_backend_buffer_t> buffers;
+    std::vector<ggml_backend_buffer_type_t> supported_bufts;
+    std::vector<ggml_backend_buffer_type_t> extra_bufts = { nullptr };
 
     size_t allocated_total() const {
         size_t n = 0;
@@ -96,13 +100,25 @@ static bool dummy_backend_device_supports_op(ggml_backend_dev_t, const ggml_tens
 }
 
 static bool dummy_backend_device_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft) {
-    return device->context == buft->context;
+    const auto * ctx = (dummy_backend_context *) device->context;
+    return device->context == buft->context || std::find(ctx->supported_bufts.begin(), ctx->supported_bufts.end(), buft) != ctx->supported_bufts.end();
 }
 
 // ggml_backend interface
 
 static const char * dummy_backend_get_name(ggml_backend_t) {
     return "dummy_backend";
+}
+
+static ggml_backend_buffer_type_t * dummy_backend_device_get_extra_bufts(ggml_backend_dev_t device) {
+    return ((dummy_backend_context *) device->context)->extra_bufts.data();
+}
+
+static void * dummy_backend_reg_get_proc_address(ggml_backend_reg_t, const char * name) {
+    if (strcmp(name, "ggml_backend_dev_get_extra_bufts") == 0) {
+        return (void *) dummy_backend_device_get_extra_bufts;
+    }
+    return nullptr;
 }
 
 // dummy_backend
@@ -126,6 +142,8 @@ static dummy_backend dummy_backend_init(size_t max_buffer_size, size_t alignment
     b.context->buffer_interface.get_tensor    = dummy_backend_buffer_get_tensor;
     b.context->buffer_interface.clear         = dummy_backend_buffer_clear;
 
+    b.context->reg.iface.get_proc_address = dummy_backend_reg_get_proc_address;
+    b.context->device.reg                 = &b.context->reg;
     b.context->device.context             = b.context.get();
     b.context->device.iface.get_type      = dummy_backend_device_get_type;
     b.context->device.iface.supports_op   = dummy_backend_device_supports_op;
@@ -550,8 +568,11 @@ static void test_multiple_buffer_types() {
     check_all_allocated(graph);
     check_no_overlap(graph);
     check_max_size(ctx);
+    for (int i = 0; i < graph->n_nodes; i++) {
+        GGML_ASSERT(ggml_backend_buffer_get_type(graph->nodes[i]->buffer) == bufts[node_buffer_ids[i]]);
+    }
     GGML_ASSERT(backend_a.context->allocated_total() <= 32 + 32 + 24);
-    GGML_ASSERT(backend_b.context->allocated_total() <= 32 + 24);
+    GGML_ASSERT(backend_b.context->allocated_total() <= 32 + 32);
 }
 
 static void test_buffer_size_zero() {
@@ -650,6 +671,105 @@ static void test_graph_optimize_alloc_dep() {
     GGML_ASSERT(!graph_reuses_allocation(true));
 }
 
+static void test_sched_shared_buffer(bool shared, bool extra_consumer, bool parallel, int extra_buft = 0) {
+    dummy_backend producer = dummy_backend_init(SIZE_MAX);
+    dummy_backend consumer = dummy_backend_init(SIZE_MAX);
+    dummy_backend other    = dummy_backend_init(SIZE_MAX);
+    dummy_backend shared_buffer = dummy_backend_init(SIZE_MAX);
+    ggml_backend_buffer_type_t shared_buft = extra_buft ? &shared_buffer.buffer_type : &consumer.buffer_type;
+    if (extra_buft) {
+        dummy_backend & provider = extra_buft == 1 ? producer : consumer;
+        provider.context->extra_bufts = { &provider.buffer_type, shared_buft, shared_buft, nullptr };
+        consumer.context->supported_bufts.push_back(shared_buft);
+    }
+    if (shared) {
+        producer.context->supported_bufts.push_back(shared_buft);
+    }
+    other.context->supported_bufts.push_back(&producer.buffer_type);
+
+    ggml_backend_t backends[] = { &producer.context->backend, &consumer.context->backend, &other.context->backend };
+    ggml_backend_buffer_type_t bufts[] = { &producer.buffer_type, &consumer.buffer_type, &other.buffer_type };
+    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, bufts, 3, 32, parallel, false));
+    auto [ctx, graph, ctx_ptr] = make_context();
+
+    ggml_tensor * input = make_input_with_size(ctx, 16);
+    ggml_tensor * first = ggml_scale(ctx, input, 2.0f);
+    ggml_tensor * activation = ggml_scale(ctx, first, 2.0f);
+    ggml_tensor * view = ggml_reshape_1d(ctx, ggml_view_1d(ctx, activation, 4, 0), 4);
+    ggml_tensor * result = ggml_scale(ctx, view, 2.0f);
+    ggml_set_output(result);
+    ggml_build_forward_expand(graph, result);
+    ggml_backend_sched_set_tensor_backend(sched.get(), input, backends[0]);
+    ggml_backend_sched_set_tensor_backend(sched.get(), first, backends[0]);
+    ggml_backend_sched_set_tensor_backend(sched.get(), activation, backends[0]);
+    ggml_backend_sched_set_tensor_backend(sched.get(), result, backends[1]);
+    ggml_tensor * input_view = ggml_view_1d(ctx, input, 4, 0);
+    ggml_tensor * input_result = ggml_scale(ctx, input_view, 2.0f);
+    ggml_set_output(input_result);
+    ggml_build_forward_expand(graph, input_result);
+    ggml_backend_sched_set_tensor_backend(sched.get(), input_result, backends[1]);
+    if (extra_consumer) {
+        ggml_tensor * result_other = ggml_scale(ctx, activation, 2.0f);
+        ggml_set_output(result_other);
+        ggml_build_forward_expand(graph, result_other);
+        ggml_backend_sched_set_tensor_backend(sched.get(), result_other, backends[2]);
+    }
+
+    GGML_ASSERT(ggml_backend_sched_alloc_graph(sched.get(), graph));
+    const bool use_shared = shared && !extra_consumer;
+    for (int b = 0; b < 3; b++) {
+        const size_t extra_size = extra_buft && b == extra_buft - 1 ? shared_buffer.context->allocated_total() : 0;
+        dummy_backend * devices[] = { &producer, &consumer, &other };
+        GGML_ASSERT(ggml_backend_sched_get_buffer_size(sched.get(), backends[b]) == devices[b]->context->allocated_total() + extra_size);
+    }
+    GGML_ASSERT(ggml_backend_buffer_get_type(input->buffer) == bufts[0]);
+    GGML_ASSERT(input_result->src[0] != input_view);
+    GGML_ASSERT(ggml_backend_buffer_get_type(first->buffer) == bufts[0]);
+    GGML_ASSERT(ggml_backend_buffer_get_type(activation->buffer) == (use_shared ? shared_buft : bufts[0]));
+    GGML_ASSERT(view->buffer == activation->buffer);
+    GGML_ASSERT((result->src[0] == view) == use_shared);
+    GGML_ASSERT(ggml_backend_sched_get_tensor_backend(sched.get(), activation) == backends[0]);
+    GGML_ASSERT(ggml_backend_buffer_get_type(result->src[0]->buffer) == (use_shared ? shared_buft : bufts[1]));
+}
+
+static void test_sched_shared_extra_buffer_sizes() {
+    dummy_backend producer = dummy_backend_init(SIZE_MAX);
+    dummy_backend consumer = dummy_backend_init(SIZE_MAX);
+    dummy_backend shared_buffer = dummy_backend_init(SIZE_MAX);
+    producer.context->supported_bufts.push_back(&shared_buffer.buffer_type);
+    consumer.context->supported_bufts.push_back(&shared_buffer.buffer_type);
+    consumer.context->extra_bufts = { &shared_buffer.buffer_type, nullptr };
+
+    auto [weight_ctx, weight_graph, weight_ctx_ptr] = make_context();
+    ggml_tensor * weight0 = make_input_with_size(weight_ctx, 16);
+    ggml_backend_buffer_ptr buf0(ggml_backend_alloc_ctx_tensors_from_buft(weight_ctx, &producer.buffer_type));
+    ggml_backend_buffer_set_usage(buf0.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    auto [weight_ctx1, weight_graph1, weight_ctx_ptr1] = make_context();
+    ggml_tensor * weight1 = make_input_with_size(weight_ctx1, 16);
+    ggml_backend_buffer_ptr buf1(ggml_backend_alloc_ctx_tensors_from_buft(weight_ctx1, &consumer.buffer_type));
+    ggml_backend_buffer_set_usage(buf1.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+    ggml_backend_t backends[] = { &producer.context->backend, &consumer.context->backend };
+    ggml_backend_buffer_type_t bufts[] = { &producer.buffer_type, &consumer.buffer_type };
+    ggml_backend_sched_ptr sched(ggml_backend_sched_new(backends, bufts, 2, 32, false, false));
+    auto [ctx, graph, ctx_ptr] = make_context();
+    ggml_tensor * activation = ggml_scale(ctx, weight0, 2.0f);
+    ggml_tensor * result = ggml_add(ctx, activation, weight1);
+    ggml_set_output(result);
+    ggml_build_forward_expand(graph, result);
+
+    size_t sizes[3] = { 0, 0, SIZE_MAX };
+    ggml_backend_sched_reserve_size(sched.get(), graph, sizes);
+    GGML_ASSERT(sizes[2] == SIZE_MAX);
+    GGML_ASSERT(ggml_backend_sched_reserve(sched.get(), graph));
+    GGML_ASSERT(ggml_backend_sched_alloc_graph(sched.get(), graph));
+    GGML_ASSERT(ggml_backend_buffer_get_type(activation->buffer) == &shared_buffer.buffer_type);
+    GGML_ASSERT(shared_buffer.context->allocated_total() > 0);
+    for (int b = 0; b < 2; b++) {
+        GGML_ASSERT(sizes[b] == ggml_backend_sched_get_buffer_size(sched.get(), backends[b]));
+    }
+}
+
 static void run(const char * name, void (*f)()) {
     printf("%s ", name);
     fflush(stdout);
@@ -672,5 +792,15 @@ int main() {
     run("test_buffer_size_zero", test_buffer_size_zero);
     run("test_reallocation", test_reallocation);
     run("test_graph_optimize_alloc_dep", test_graph_optimize_alloc_dep);
+    run("test_sched_shared_buffer", []() { test_sched_shared_buffer(true, false, false); });
+    run("test_sched_shared_buffer_parallel", []() { test_sched_shared_buffer(true, false, true); });
+    run("test_sched_shared_buffer_unsupported_producer", []() { test_sched_shared_buffer(false, false, false); });
+    run("test_sched_shared_buffer_unsupported_consumer", []() { test_sched_shared_buffer(true, true, false); });
+    run("test_sched_shared_extra_buffer_sizes", test_sched_shared_extra_buffer_sizes);
+    run("test_sched_shared_extra_buffer_producer", []() { test_sched_shared_buffer(true, false, false, 1); });
+    run("test_sched_shared_extra_buffer_consumer", []() { test_sched_shared_buffer(true, false, false, 2); });
+    run("test_sched_shared_extra_buffer_parallel", []() { test_sched_shared_buffer(true, false, true, 2); });
+    run("test_sched_shared_extra_buffer_unsupported_producer", []() { test_sched_shared_buffer(false, false, false, 2); });
+    run("test_sched_shared_extra_buffer_unsupported_consumer", []() { test_sched_shared_buffer(true, true, false, 1); });
     return 0;
 }

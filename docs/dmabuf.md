@@ -40,6 +40,7 @@ embedding and other host-only tensors.
 - The Vulkan backend imports via `VK_EXT_external_memory_dma_buf` +
   `VK_KHR_external_memory_fd`, and resolves tensors through the same pointer
   lookup used for host-mapped tensors, on both UMA and non-UMA devices.
+- The scheduler considers device defaults and extra buffer types when selecting shared activation storage supported by every producer and consumer.
 - The scheduler only inserts a copy between two backends when the target
   backend does not support the source buffer type, so a shared dma-buf tensor
   is used in place.
