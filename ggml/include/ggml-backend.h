@@ -132,8 +132,8 @@ extern "C" {
     // Fences
     //
     // A portable completion signal used to order work between backends that share
-    // memory, without a full synchronize. Backed by a sync_file fd, which another
-    // backend can import or the host can poll. A fence only means "all work
+    // memory, without a full synchronize. Backed by a native completion signal
+    // that another backend can import or the host can wait on. A fence only means "all work
     // submitted before the record is done", not anything about the memory itself.
 
     // export the completion of an event as a fence, or NULL if not supported

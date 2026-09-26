@@ -172,12 +172,27 @@ extern "C" {
         void * context;
     };
 
+    enum ggml_backend_fence_type {
+        GGML_BACKEND_FENCE_SYNC_FILE,
+        GGML_BACKEND_FENCE_METAL,
+    };
+
+    struct ggml_backend_fence_i {
+        ggml_backend_fence_t (*dup) (ggml_backend_fence_t fence);
+        void                (*free)(ggml_backend_fence_t fence);
+        void                (*sync)(ggml_backend_fence_t fence);
+    };
+
     struct ggml_backend_fence {
         int fd; // owned sync_file fd, -1 if none
+        enum ggml_backend_fence_type type;
+        struct ggml_backend_fence_i iface;
+        void * context;
     };
 
     // create a fence from an owned fd, used by backends implementing event_export_fence
     GGML_API ggml_backend_fence_t ggml_backend_fence_init(int fd);
+    GGML_API ggml_backend_fence_t ggml_backend_fence_init_native(enum ggml_backend_fence_type type, struct ggml_backend_fence_i iface, void * context);
 
     //
     // Backend device

@@ -577,9 +577,18 @@ void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event)
 // fences
 
 ggml_backend_fence_t ggml_backend_fence_init(int fd) {
-    ggml_backend_fence_t fence = (ggml_backend_fence_t) malloc(sizeof(struct ggml_backend_fence));
+    ggml_backend_fence_t fence = (ggml_backend_fence_t) calloc(1, sizeof(struct ggml_backend_fence));
     GGML_ASSERT(fence != NULL);
     fence->fd = fd;
+    return fence;
+}
+
+ggml_backend_fence_t ggml_backend_fence_init_native(enum ggml_backend_fence_type type, struct ggml_backend_fence_i iface, void * context) {
+    GGML_ASSERT(type != GGML_BACKEND_FENCE_SYNC_FILE && iface.dup && iface.free && iface.sync);
+    ggml_backend_fence_t fence = ggml_backend_fence_init(-1);
+    fence->type = type;
+    fence->iface = iface;
+    fence->context = context;
     return fence;
 }
 
@@ -607,6 +616,9 @@ ggml_backend_fence_t ggml_backend_fence_dup(ggml_backend_fence_t fence) {
     if (fence == NULL) {
         return NULL;
     }
+    if (fence->iface.dup) {
+        return fence->iface.dup(fence);
+    }
 #if defined(__linux__)
     const int fd = fence->fd >= 0 ? dup(fence->fd) : -1;
 #else
@@ -619,6 +631,9 @@ void ggml_backend_fence_free(ggml_backend_fence_t fence) {
     if (fence == NULL) {
         return;
     }
+    if (fence->iface.free) {
+        fence->iface.free(fence);
+    }
 #if defined(__linux__)
     if (fence->fd >= 0) {
         close(fence->fd);
@@ -628,7 +643,14 @@ void ggml_backend_fence_free(ggml_backend_fence_t fence) {
 }
 
 void ggml_backend_fence_sync(ggml_backend_fence_t fence) {
-    if (fence == NULL || fence->fd < 0) {
+    if (fence == NULL) {
+        return;
+    }
+    if (fence->iface.sync) {
+        fence->iface.sync(fence);
+        return;
+    }
+    if (fence->fd < 0) {
         return;
     }
 #if defined(__linux__)
