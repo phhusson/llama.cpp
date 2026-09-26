@@ -19,18 +19,6 @@
 // TODO: dedup
 static constexpr int64_t GGML_METAL_MIN_THREADGROUPS = 128;
 
-static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
-    if (!t) {
-        return { nullptr, 0 };
-    }
-
-    ggml_backend_buffer_t buffer = t->view_src ? t->view_src->buffer : t->buffer;
-
-    ggml_metal_buffer_t ctx = (ggml_metal_buffer_t) buffer->context;
-
-    return ggml_metal_buffer_get_id(ctx, t);
-}
-
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,
