@@ -74,6 +74,24 @@ aborts. Treat a dma-buf import failure as a configuration/driver problem.
 
 Shared allocations avoid copies but do not remove cross-backend synchronization costs. Vulkan quantized views still have layout restrictions: a misaligned Q4_0 view can assert, and sliced MoE expert weights can produce incorrect results even with native output buffers. Contiguous expert weights passed the shared-buffer checks.
 
+### ROCm/Vulkan routing
+
+`GGML_ROCM_MIN_N=8` makes ROCm reject compute operations whose estimated batch size is below 8. The scheduler can then select Vulkan when it supports the operation and its buffers. The estimate follows activation inputs through reshapes and elementwise operations so attention heads are not counted as tokens. GET_ROWS remains excluded from this ROCm offload policy; views and other metadata operations remain supported. The threshold is disabled by default and read once per process.
+
+For example, on an AMD UMA GPU:
+
+```sh
+GGML_DMABUF_HEAP=amdgpu GGML_DMABUF_AMDGPU_DEVICE=/dev/dri/renderD128 \
+GGML_DMABUFT=1 GGML_ROCM_MIN_N=8 \
+    llama-bench -m model.gguf --device ROCm0/Vulkan0 -ts 1/0 \
+    -ub 4096 -p 8192 -n 8 -pg 8192,8 -fa on \
+    -ot 'blk\..*=DMA_BUF' --lazy-mode on
+```
+
+Use `-fa on` when both backends support Flash Attention: the automatic probe can disable it because the selected backend differs from the layer's original device. `-pg` exercises the prompt-to-generation state handoff, while `-p` and `-n` benchmark the phases separately.
+
+This is an operation-level placement heuristic, not a strict phase switch. Small prompt operations can run on Vulkan or CPU, and other model architectures can need different batch-size estimates. Use `GGML_SCHED_DEBUG=2` with `llama-bench -v` to inspect placement.
+
 ### `-ot` bypasses the load-time support check
 
 Tensor buffer overrides force the requested buffer type without checking that a
