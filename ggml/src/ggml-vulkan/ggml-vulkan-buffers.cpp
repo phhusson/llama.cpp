@@ -6,6 +6,10 @@
 #include <mutex>
 #include <shared_mutex>
 
+#if defined(__linux__)
+#include <unistd.h>
+#endif
+
 static void * portable_aligned_malloc(size_t align, size_t size) {
 #ifdef _WIN32
     return _aligned_malloc(size, align);
@@ -354,36 +358,123 @@ void ggml_vk_host_get(const vk_device& device, const void * ptr, vk_buffer& buf,
     buf = nullptr;
     buf_offset = 0;
 
-    std::unique_lock<std::shared_mutex> guard(vk_instance.host_allocations_mutex);
+    {
+        std::unique_lock<std::shared_mutex> guard(vk_instance.host_allocations_mutex);
 
-    const size_t index = ggml_vk_host_allocation_find(ptr);
-    if (index == SIZE_MAX) {
-        return;
-    }
-    vk_host_allocation & entry = vk_instance.host_allocations[index];
+        const size_t index = ggml_vk_host_allocation_find(ptr);
+        if (index != SIZE_MAX) {
+            vk_host_allocation & entry = vk_instance.host_allocations[index];
 
-    if (entry.views[device->idx] == nullptr) {
-        if (!vk_instance.multi_device) {
-            return;
-        }
-        if (!device->external_memory_host) {
-            static std::atomic<uint32_t> warned_mask{0};
-            const uint32_t bit = 1u << device->idx;
-            if (!(warned_mask.fetch_or(bit) & bit)) {
-                GGML_LOG_WARN("ggml_vulkan: %s does not support VK_EXT_external_memory_host; host memory "
-                    "will be staged, not pinned, on this device\n", device->name.c_str());
+            if (entry.views[device->idx] == nullptr) {
+                if (!vk_instance.multi_device) {
+                    return;
+                }
+                if (!device->external_memory_host) {
+                    static std::atomic<uint32_t> warned_mask{0};
+                    const uint32_t bit = 1u << device->idx;
+                    if (!(warned_mask.fetch_or(bit) & bit)) {
+                        GGML_LOG_WARN("ggml_vulkan: %s does not support VK_EXT_external_memory_host; host memory "
+                            "will be staged, not pinned, on this device\n", device->name.c_str());
+                    }
+                    return;
+                }
+                // const only propagates from the const context; the pointee is mutable
+                entry.views[device->idx] = ggml_vk_buffer_from_host_ptr(const_cast<vk_device&>(device), entry.base, entry.size);
+                if (entry.views[device->idx] == nullptr) {
+                    return;
+                }
             }
-            return;
-        }
-        // const only propagates from the const context; the pointee is mutable
-        entry.views[device->idx] = ggml_vk_buffer_from_host_ptr(const_cast<vk_device&>(device), entry.base, entry.size);
-        if (entry.views[device->idx] == nullptr) {
+
+            buf = entry.views[device->idx];
+            buf_offset = (const uint8_t *) ptr - (const uint8_t *) entry.base;
             return;
         }
     }
 
-    buf = entry.views[device->idx];
-    buf_offset = (const uint8_t *) ptr - (const uint8_t *) entry.base;
+    // fall back to imported dma-buf buffers
+    std::shared_lock<std::shared_mutex> guard(device->dmabuf_memory_mutex);
+    for (size_t i = 0; i < device->dmabuf_memory.size(); i++) {
+        const uint8_t* addr = (const uint8_t*) std::get<0>(device->dmabuf_memory[i]);
+        const uint8_t* endr = addr + std::get<1>(device->dmabuf_memory[i]);
+        if (ptr >= addr && ptr < endr) {
+            buf = std::get<3>(device->dmabuf_memory[i]);
+            buf_offset = ((const uint8_t *)ptr) - addr;
+            return;
+        }
+    }
+}
+
+vk_buffer ggml_vk_import_dmabuf(vk_device& device, int fd, size_t size) {
+    if (!device->external_memory_fd || !device->external_memory_dma_buf || size == 0) {
+        return nullptr;
+    }
+
+#if !defined(__linux__)
+    return nullptr;
+#else
+    vk::ExternalMemoryBufferCreateInfo ext_mem_bci;
+    ext_mem_bci.handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+
+    vk::BufferCreateInfo buffer_create_info({}, size,
+        vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst,
+        vk::SharingMode::eExclusive, 0, nullptr);
+    buffer_create_info.pNext = &ext_mem_bci;
+
+    vk_buffer buf = std::make_shared<vk_buffer_struct>();
+    buf->buffer = device->device.createBuffer(buffer_create_info);
+
+    const vk::MemoryRequirements mem_req = device->device.getBufferMemoryRequirements(buf->buffer);
+    const vk::MemoryFdPropertiesKHR fd_props = device->device.getMemoryFdPropertiesKHR(vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT, fd);
+
+    const vk::PhysicalDeviceMemoryProperties mem_props = device->physical_device.getMemoryProperties();
+
+    uint32_t memory_type_idx = UINT32_MAX;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+        if ((mem_req.memoryTypeBits & (1u << i)) && (fd_props.memoryTypeBits & (1u << i))) {
+            memory_type_idx = i;
+            break;
+        }
+    }
+    if (memory_type_idx == UINT32_MAX) {
+        device->device.destroyBuffer(buf->buffer);
+        return nullptr;
+    }
+
+    // the implementation takes ownership of the imported fd, so hand it a duplicate
+    const int import_fd = dup(fd);
+    if (import_fd < 0) {
+        device->device.destroyBuffer(buf->buffer);
+        return nullptr;
+    }
+
+    vk::MemoryDedicatedAllocateInfo dedicated_info;
+    dedicated_info.buffer = buf->buffer;
+
+    vk::ImportMemoryFdInfoKHR import_info;
+    import_info.handleType = vk::ExternalMemoryHandleTypeFlagBits::eDmaBufEXT;
+    import_info.fd = import_fd;
+    import_info.pNext = &dedicated_info;
+
+    buf->device_memory = device->device.allocateMemory({ mem_req.size, memory_type_idx, &import_info });
+    buf->memory_property_flags = mem_props.memoryTypes[memory_type_idx].propertyFlags;
+    buf->ptr = nullptr;
+    if (buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible) {
+        buf->ptr = device->device.mapMemory(buf->device_memory, 0, VK_WHOLE_SIZE);
+    }
+    device->device.bindBufferMemory(buf->buffer, buf->device_memory, 0);
+
+    buf->device = device;
+    buf->size = size;
+
+    if (device->buffer_device_address) {
+        const vk::BufferDeviceAddressInfo addressInfo(buf->buffer);
+        buf->bda_addr = device->device.getBufferAddress(addressInfo);
+    }
+
+    device->memory_logger->log_allocation(buf, size);
+
+    return buf;
+#endif
 }
 
 void ggml_vk_ensure_sync_staging_buffer(vk_device& device, size_t size) {
