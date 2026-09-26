@@ -12,3 +12,11 @@ target_sources(ggml-base PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/ggml-dmabuf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ggml-dmabuf-allocators.cpp)
 target_compile_definitions(ggml-base PUBLIC GGML_USE_DMABUF)
+
+# the NVIDIA nvkms allocator needs libdrm headers
+check_include_file("drm/drm.h" GGML_DMABUF_HAVE_DRM)
+if (GGML_DMABUF_HAVE_DRM)
+    target_compile_definitions(ggml-base PRIVATE GGML_DMABUF_NVIDIA)
+else()
+    message(WARNING "drm/drm.h not found, the NVIDIA dma-buf allocator is disabled")
+endif()

@@ -78,7 +78,7 @@ device memory. Prefer scoped patterns.
 
 The buffer type reports as host memory because the current allocation is
 CPU-mappable, so the CPU backend can run ops on it and act as a fallback.
-Non-UMA device-local dma-bufs are still
+Non-UMA device-local dma-bufs (for example an nvkms GEM buffer) are still
 reported as host even though CPU access is slow. If a future allocation is not
 CPU-mappable, `is_host` must be set to false. Note that this alone is not
 enough: with `is_host = false` the CPU backend rejects the buffer type, and the
@@ -105,11 +105,25 @@ The allocation source is selected with environment variables. It is the only
 platform/vendor-specific part of this buffer type.
 
 - `GGML_DMABUF_HEAP` (default `system`): name of a dma-heap. The allocator opens
-  `/dev/dma_heap/$GGML_DMABUF_HEAP`.
+  `/dev/dma_heap/$GGML_DMABUF_HEAP`. The special value `nvidia` selects the
+  NVIDIA allocator instead.
+- `GGML_DMABUF_NVIDIA_DEVICE`: DRM render node used by the NVIDIA allocator,
+  for example `/dev/dri/renderD129`. Required when `GGML_DMABUF_HEAP=nvidia`.
 
 Examples:
 
 ```sh
 # system heap (default)
 llama-cli -m model.gguf -dev Vulkan0 -ot 'blk\..*=DMA_BUF'
+
+# device-local memory on an NVIDIA GPU
+GGML_DMABUF_HEAP=nvidia GGML_DMABUF_NVIDIA_DEVICE=/dev/dri/renderD129 \
+    llama-cli -m model.gguf -dev Vulkan0 -ot 'blk\..*=DMA_BUF'
 ```
+
+The NVIDIA allocator uses `DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY` followed by
+`DRM_IOCTL_PRIME_HANDLE_TO_FD`. This is an undocumented, unstable ioctl and must
+not be treated as a stable API. It can change or disappear without notice. It is
+useful to allocate device-local memory on an NVIDIA GPU, but it is opt-in only
+and is never enabled by default. Vendor allocators are expected to be kept out
+of the mainline buffer implementation.

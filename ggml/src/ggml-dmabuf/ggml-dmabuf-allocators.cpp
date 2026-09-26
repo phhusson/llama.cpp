@@ -1,6 +1,7 @@
 #include "ggml-dmabuf-allocators.h"
 #include "ggml-impl.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,10 @@
 #include <linux/dma-heap.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+#ifdef GGML_DMABUF_NVIDIA
+#include <drm/drm.h>
+#endif
 
 size_t ggml_dmabuf_page_align(size_t size) {
     const long page = sysconf(_SC_PAGESIZE);
@@ -44,10 +49,83 @@ static int allocate_dmabuf_heap(const char * heap, size_t size) {
     return fd;
 }
 
+#ifdef GGML_DMABUF_NVIDIA
+// Crude NVIDIA nvkms GEM allocator.
+// DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY is an undocumented, unstable ioctl.
+// It is opt-in via GGML_DMABUF_HEAP=nvidia, with the render node in GGML_DMABUF_NVIDIA_DEVICE.
+#define DRM_NVIDIA_GEM_ALLOC_NVKMS_MEMORY 0x0b
+
+#define NV_GEM_ALLOC_NO_SCANOUT (1 << 0)
+
+struct drm_nvidia_gem_alloc_nvkms_memory_params {
+    uint32_t handle;        /* OUT GEM handle */
+    uint8_t  block_linear;  /* IN 1 = block linear, 0 = pitch linear */
+    uint8_t  compressible;  /* IN/OUT 1 = allow compressible memory */
+    uint16_t __pad0;        /* IN must be 0 */
+    uint64_t memory_size;   /* IN size in bytes */
+    uint32_t flags;         /* IN NV_GEM_ALLOC_* */
+    uint32_t __pad1;        /* IN must be 0 */
+};
+
+#define DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY                          \
+    DRM_IOWR((DRM_COMMAND_BASE + DRM_NVIDIA_GEM_ALLOC_NVKMS_MEMORY),     \
+             struct drm_nvidia_gem_alloc_nvkms_memory_params)
+
+static int allocate_dmabuf_nvidia(size_t size) {
+    const char * device = getenv("GGML_DMABUF_NVIDIA_DEVICE");
+    if (device == nullptr) {
+        GGML_LOG_ERROR("%s: GGML_DMABUF_NVIDIA_DEVICE is not set\n", __func__);
+        return -1;
+    }
+
+    int drm_fd = open(device, O_RDWR | O_CLOEXEC);
+    if (drm_fd < 0) {
+        GGML_LOG_ERROR("%s: failed to open %s\n", __func__, device);
+        return -1;
+    }
+
+    struct drm_nvidia_gem_alloc_nvkms_memory_params params;
+    memset(&params, 0, sizeof(params));
+    params.memory_size  = size;
+    params.block_linear = 0;
+    params.compressible = 0;
+    params.flags        = NV_GEM_ALLOC_NO_SCANOUT;
+
+    if (ioctl(drm_fd, DRM_IOCTL_NVIDIA_GEM_ALLOC_NVKMS_MEMORY, &params) < 0) {
+        GGML_LOG_ERROR("%s: DRM_NVIDIA_GEM_ALLOC_NVKMS_MEMORY failed: %s\n", __func__, strerror(errno));
+        close(drm_fd);
+        return -1;
+    }
+
+    struct drm_prime_handle prime = {
+        /* .handle = */ params.handle,
+        /* .flags  = */ DRM_CLOEXEC | DRM_RDWR,
+        /* .fd     = */ 0,
+    };
+
+    if (ioctl(drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime) < 0) {
+        GGML_LOG_ERROR("%s: DRM_IOCTL_PRIME_HANDLE_TO_FD failed: %s\n", __func__, strerror(errno));
+        close(drm_fd);
+        return -1;
+    }
+
+    close(drm_fd);
+    return prime.fd;
+}
+#endif // GGML_DMABUF_NVIDIA
+
 int ggml_backend_dmabuf_alloc(size_t size) {
     const char * heap = getenv("GGML_DMABUF_HEAP");
     if (heap == nullptr) {
         heap = "system";
+    }
+    if (strcmp(heap, "nvidia") == 0) {
+#ifdef GGML_DMABUF_NVIDIA
+        return allocate_dmabuf_nvidia(size);
+#else
+        GGML_LOG_ERROR("%s: this build has no NVIDIA dma-buf allocator\n", __func__);
+        return -1;
+#endif
     }
     return allocate_dmabuf_heap(heap, size);
 }
