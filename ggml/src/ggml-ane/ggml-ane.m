@@ -403,13 +403,31 @@ static void ane_encode_convert(struct ane_context * ctx, id<MTLCommandBuffer> cb
     [enc endEncoding];
 }
 
+static void ane_reap(struct ane_context * ctx) {
+    for (NSUInteger i = ctx->requests.count; i > 0; --i) {
+        GGMLANETicket * ticket = ctx->requests[i - 1][1];
+        if (atomic_load(&ticket->completed)) {
+            [ctx->requests removeObjectAtIndex:i - 1];
+        }
+    }
+    for (NSUInteger i = ctx->commands.count; i > 0; --i) {
+        id<MTLCommandBuffer> cb = ctx->commands[i - 1];
+        if (cb.status == MTLCommandBufferStatusError) {
+            ane_fail(ctx, cb.error.description);
+        }
+        if (cb.status == MTLCommandBufferStatusCompleted || cb.status == MTLCommandBufferStatusError) {
+            [ctx->commands removeObjectAtIndex:i - 1];
+        }
+    }
+}
+
 static enum ggml_status ane_graph_compute(ggml_backend_t backend, struct ggml_cgraph * graph) {
     struct ane_context * ctx = backend->context;
-    @autoreleasepool {
-        if (atomic_load(&ctx->failed)) {
-            return GGML_STATUS_FAILED;
-        }
-        for (int i = 0; i < graph->n_nodes; ++i) {
+    if (atomic_load(&ctx->failed)) {
+        return GGML_STATUS_FAILED;
+    }
+    for (int i = 0; i < graph->n_nodes; ++i) {
+        @autoreleasepool {
             struct ggml_tensor * op = graph->nodes[i];
             if (op->op == GGML_OP_NONE || (op->op == GGML_OP_VIEW || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_TRANSPOSE || op->op == GGML_OP_PERMUTE)) {
                 continue;
@@ -417,10 +435,7 @@ static enum ggml_status ane_graph_compute(ggml_backend_t backend, struct ggml_cg
             if (!ane_supports_op(backend->device, op)) {
                 return GGML_STATUS_FAILED;
             }
-            // Bound temporary surfaces and pending requests across asynchronous submissions.
-            if (ctx->requests.count >= 8) {
-                ane_synchronize(backend);
-            }
+            ane_reap(ctx);
             const struct ggml_tensor * w = op->src[0], * a = op->src[1];
             GGMLANEModel * model = ane_model(ctx, w->ne[0], w->ne[1], a->ne[1]);
             if (!model) {
@@ -496,7 +511,7 @@ static enum ggml_status ane_graph_compute(ggml_backend_t backend, struct ggml_cg
                     dispatch_group_leave(ctx->pending);
                 }
             }];
-            [ctx->requests addObject:request];
+            [ctx->requests addObject:@[request, ticket]];
             [prepare addCompletedHandler:^(id<MTLCommandBuffer> cb) {
                 if (cb.status != MTLCommandBufferStatusCompleted) {
                     ane_fail(ctx, cb.error.description ? cb.error.description : @"input conversion failed");
