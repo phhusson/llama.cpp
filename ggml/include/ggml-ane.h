@@ -6,6 +6,9 @@
 extern "C" {
 #endif
 
+// GGML_ANE_MTLQUANTS selects comma-separated quant types for Metal-to-F16 conversion (default: all supported by Metal).
+// Names are case-insensitive; an empty value disables quantized ANE matmul. Read once at startup.
+// Explicitly selected quants must support Metal CPY to F16 or initialization asserts.
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_ane_reg(void);
 
 // Borrowed Metal objects remain valid for the lifetime of the ggml buffer.

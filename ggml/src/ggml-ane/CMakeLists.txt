@@ -2,6 +2,10 @@ if (NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64" OR NOT GGML_
     message(FATAL_ERROR "GGML_ANE requires native Apple Silicon macOS")
 endif()
 
+if (NOT GGML_METAL)
+    message(FATAL_ERROR "GGML_ANE requires GGML_METAL for weight conversion")
+endif()
+
 find_library(ANE_FOUNDATION Foundation REQUIRED)
 find_library(ANE_METAL Metal REQUIRED)
 find_library(ANE_IOSURFACE IOSurface REQUIRED)

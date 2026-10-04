@@ -238,6 +238,10 @@ static const struct ggml_backend_ane_buffer_api * ane_get_buffer_api(void) {
 @end
 
 struct ane_context {
+    ggml_backend_t metal;
+    ggml_backend_event_t copy_ready;
+    ggml_backend_event_t copy_done;
+    ggml_backend_buffer_t weights;
     id<MTLCommandQueue> queue;
     id<MTLSharedEvent> ready;
     id<MTLSharedEvent> done;
@@ -344,6 +348,10 @@ static void ane_synchronize(ggml_backend_t backend) {
 static void ane_free(ggml_backend_t backend) {
     ane_synchronize(backend);
     struct ane_context * ctx = backend->context;
+    ggml_backend_free(ctx->metal);
+    ggml_backend_event_free(ctx->copy_ready);
+    ggml_backend_event_free(ctx->copy_done);
+    ggml_backend_buffer_free(ctx->weights);
     [ctx->models release];
     [ctx->requests release];
     [ctx->commands release];
@@ -355,6 +363,57 @@ static void ane_free(ggml_backend_t backend) {
     dispatch_release(ctx->pending);
     free(ctx);
     free(backend);
+}
+
+static bool ane_metal_quant(enum ggml_type type) {
+    static bool enabled[GGML_TYPE_COUNT];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        @autoreleasepool {
+            const char * value = getenv("GGML_ANE_MTLQUANTS");
+            ggml_backend_dev_t (*find_device)(const char *) = (ggml_backend_dev_t (*)(const char *)) dlsym(RTLD_DEFAULT, "ggml_backend_dev_by_name");
+            ggml_backend_dev_t metal = find_device ? find_device("MTL0") : NULL;
+            GGML_ASSERT(metal);
+            NSArray * names = value ? [[NSString stringWithUTF8String:value] componentsSeparatedByString:@","] : @[];
+            for (NSString * entry in names) {
+                NSString * name = [entry stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (!name.length) {
+                    continue;
+                }
+                bool found = false;
+                for (int i = 0; i < GGML_TYPE_COUNT; ++i) {
+                    enum ggml_type candidate = (enum ggml_type) i;
+                    if (ggml_is_quantized(candidate) && [name caseInsensitiveCompare:[NSString stringWithUTF8String:ggml_type_name(candidate)]] == NSOrderedSame) {
+                        enabled[candidate] = true;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    GGML_LOG_WARN("ANE: unsupported GGML_ANE_MTLQUANTS entry '%s'\n", name.UTF8String);
+                }
+            }
+            for (int i = 0; i < GGML_TYPE_COUNT; ++i) {
+                enum ggml_type candidate = (enum ggml_type) i;
+                if (!ggml_is_quantized(candidate) || (value && !enabled[candidate])) {
+                    continue;
+                }
+                struct ggml_init_params params = { .mem_size = 3*ggml_tensor_overhead(), .no_alloc = true };
+                struct ggml_context * ctx = ggml_init(params);
+                GGML_ASSERT(ctx);
+                struct ggml_tensor * src = ggml_new_tensor_2d(ctx, candidate, ggml_blck_size(candidate), 1);
+                struct ggml_tensor * copy = ggml_cast(ctx, src, GGML_TYPE_F16);
+                bool supported = ggml_backend_dev_supports_op(metal, copy);
+                if (value && !supported) {
+                    GGML_LOG_ERROR("ANE: MTL0 does not support CPY %s -> F16\n", ggml_type_name(candidate));
+                    GGML_ASSERT(supported);
+                }
+                ggml_free(ctx);
+                enabled[candidate] = supported;
+            }
+        }
+    });
+    return enabled[type];
 }
 
 static bool ane_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
@@ -375,7 +434,7 @@ static bool ane_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * o
     if (w->view_offs % page || (a->type == GGML_TYPE_F16 && a->view_offs % page)) {
         return false;
     }
-    return w->type == GGML_TYPE_F16 && (a->type == GGML_TYPE_F32 || a->type == GGML_TYPE_F16) && op->type == GGML_TYPE_F32 &&
+    return (w->type == GGML_TYPE_F16 || ane_metal_quant(w->type)) && (a->type == GGML_TYPE_F32 || a->type == GGML_TYPE_F16) && op->type == GGML_TYPE_F32 &&
         w->ne[0] >= 32 && w->ne[1] >= 32 && a->ne[1] >= 32 &&
         w->ne[0] % 32 == 0 && w->ne[1] % 32 == 0 && a->ne[1] % 32 == 0 &&
         w->ne[0] <= 16384 && w->ne[1] <= 16384 && a->ne[1] <= 4096 &&
@@ -401,6 +460,64 @@ static void ane_encode_convert(struct ane_context * ctx, id<MTLCommandBuffer> cb
         [enc dispatchThreadgroups:MTLSizeMake(tensor->ne[1], 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     }
     [enc endEncoding];
+}
+
+static bool ane_wait_backend(ggml_backend_t dst, ggml_backend_t src, ggml_backend_event_t event) {
+    ggml_backend_event_record(event, src);
+    ggml_backend_fence_t fence = ggml_backend_event_export_fence(src, event);
+    bool ok = ggml_backend_fence_wait(dst, fence);
+    ggml_backend_fence_free(fence);
+    return ok;
+}
+
+static enum ggml_status ane_prepare_weights(ggml_backend_t backend, struct ggml_tensor * w, struct ggml_tensor * dst) {
+    struct ane_context * ctx = backend->context;
+    size_t size = ane_page_align(ggml_nelements(w)*sizeof(ggml_fp16_t));
+    if (!ctx->weights || size > ggml_backend_buffer_get_size(ctx->weights)) {
+        if (ctx->weights) {
+            size = MAX(size, MIN(2*ggml_backend_buffer_get_size(ctx->weights), ane_device.maxBufferLength));
+        }
+        ggml_backend_buffer_t buffer = ane_buffer_alloc(&ane_buft, size);
+        if (!buffer) {
+            return GGML_STATUS_ALLOC_FAILED;
+        }
+        if (ctx->weights) {
+            ggml_backend_buffer_t old = ctx->weights;
+            id<MTLCommandBuffer> retire = [ctx->queue commandBuffer];
+            [retire addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+                GGML_UNUSED(cb);
+                ggml_backend_buffer_free(old);
+            }];
+            [retire commit];
+            [ctx->commands addObject:retire];
+        }
+        ctx->weights = buffer;
+        GGML_LOG_DEBUG("ANE: F16 weight scratch %.2f MiB\n", size/(1024.0*1024.0));
+    }
+    *dst = (struct ggml_tensor) { .type = GGML_TYPE_F16, .buffer = ctx->weights, .op = GGML_OP_CPY, .flags = GGML_TENSOR_FLAG_COMPUTE };
+    dst->nb[0] = sizeof(ggml_fp16_t);
+    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+        dst->ne[d] = w->ne[d];
+        if (d) {
+            dst->nb[d] = dst->nb[d - 1]*dst->ne[d - 1];
+        }
+    }
+    dst->data = ggml_backend_buffer_get_base(ctx->weights);
+    dst->src[0] = w;
+    dst->src[1] = dst;
+    ggml_set_name(dst, "ane_weights_f16");
+    struct ggml_tensor * nodes[] = { dst };
+    struct ggml_cgraph graph = { .size = 1, .n_nodes = 1, .nodes = nodes };
+
+    // Wait for previous ANE reads and incoming dependencies before overwriting scratch.
+    if (!ane_wait_backend(ctx->metal, backend, ctx->copy_ready)) {
+        return GGML_STATUS_FAILED;
+    }
+    enum ggml_status status = ggml_backend_graph_compute_async(ctx->metal, &graph);
+    if (status != GGML_STATUS_SUCCESS) {
+        return status;
+    }
+    return ane_wait_backend(backend, ctx->metal, ctx->copy_done) ? GGML_STATUS_SUCCESS : GGML_STATUS_FAILED;
 }
 
 static void ane_reap(struct ane_context * ctx) {
@@ -442,6 +559,14 @@ static enum ggml_status ane_graph_compute(ggml_backend_t backend, struct ggml_cg
                 return GGML_STATUS_FAILED;
             }
 
+            struct ggml_tensor converted;
+            if (ggml_is_quantized(w->type)) {
+                enum ggml_status status = ane_prepare_weights(backend, op->src[0], &converted);
+                if (status != GGML_STATUS_SUCCESS) {
+                    return status;
+                }
+                w = &converted;
+            }
             id ws = ane_tensor_surface(w);
             IOSurfaceRef act = NULL;
             id<MTLBuffer> act_metal = nil;
@@ -623,6 +748,13 @@ static ggml_backend_t ane_init(ggml_backend_dev_t dev, const char * params) {
         ctx->commands = [NSMutableArray new];
         ctx->pending = dispatch_group_create();
         atomic_init(&ctx->failed, false);
+        // The registry lives in libggml, which depends on this backend.
+        ggml_backend_t (*init_backend)(const char *, const char *) = dlsym(RTLD_DEFAULT, "ggml_backend_init_by_name");
+        ctx->metal = init_backend ? init_backend("MTL0", NULL) : NULL;
+        ctx->copy_ready = ggml_backend_event_new(dev);
+        if (ctx->metal) {
+            ctx->copy_done = ggml_backend_event_new(ggml_backend_get_device(ctx->metal));
+        }
 
         // Scale each token to limit ANE loss of F16 subnormals; undo the scale after evaluation.
         NSString * source =
@@ -699,7 +831,7 @@ static ggml_backend_t ane_init(ggml_backend_dev_t dev, const char * params) {
             .device  = dev,
             .context = ctx,
         };
-        if (!ctx->queue || !ctx->ready || !ctx->done || !ctx->cast || !ctx->convert || ![(id) ctx->ready respondsToSelector:@selector(IOSurfaceSharedEvent)]) {
+        if (!ctx->metal || !ctx->copy_ready || !ctx->copy_done || !ctx->queue || !ctx->ready || !ctx->done || !ctx->cast || !ctx->convert || ![(id) ctx->ready respondsToSelector:@selector(IOSurfaceSharedEvent)]) {
             GGML_LOG_ERROR("ANE: initialization failed: %s\n", error.description.UTF8String);
             ane_free(backend);
             return NULL;

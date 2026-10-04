@@ -10436,6 +10436,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // test case for f16-type-convert-to-fp32 kernel with large k under fp32 compute dtype (occurs in stable-diffusion)
     // however this case needs to alloc more memory which may fail in some devices (Intel Arc770, etc.)
     // this case is verified (pass) in Intel(R) Data Center GPU Max 1100 (sycl backend) and NV A30 (cuda backend)
+    for (ggml_type type : { GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0 }) {
+        test_cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 64, 32, 256, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(type, GGML_TYPE_F32, 128, 64, 512, {1, 1}, {1, 1}));
+    }
+
     // test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F16, 512, 262144, 9216, {1, 1}, {1, 1}));
 
     // test large experts*tokens
@@ -12034,75 +12039,108 @@ static bool run_ane_metal_chain(ggml_backend_t ane, ggml_backend_t cpu, const ch
         return false;
     }
     bool ok = true;
-    for (int n : { 32, 64, 1 }) {
-        ggml_init_params params = { 1024*1024, nullptr, true };
-        ggml_context_ptr leaves(ggml_init(params));
-        ggml_new_tensor_1d(leaves.get(), GGML_TYPE_I8, 64);
-        ggml_tensor * w = ggml_new_tensor_2d(leaves.get(), GGML_TYPE_F16, 64, 64);
-        ggml_tensor * x = ggml_new_tensor_2d(leaves.get(), GGML_TYPE_F32, 64, n);
-        ggml_backend_buffer_ptr storage(ggml_backend_alloc_ctx_tensors_from_buft(leaves.get(), buft));
-        if (!storage) {
-            return false;
-        }
-        ggml_backend_buffer_set_usage(storage.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-        std::vector<ggml_fp16_t> weights(64*64, ggml_fp32_to_fp16(0));
-        for (int i = 0; i < 64; ++i) {
-            weights[i*64+i] = ggml_fp32_to_fp16(2);
-        }
-        ggml_backend_tensor_set(w, weights.data(), 0, ggml_nbytes(w));
-        ggml_context_ptr ctx(ggml_init(params));
-        ggml_tensor * unaligned = ggml_view_2d(ctx.get(), w, 64, 32, w->nb[1], 64);
-        ok = !ggml_backend_supports_op(ane, ggml_mul_mat(ctx.get(), unaligned, x)) && ok;
-        ok = !ggml_backend_supports_op(ane, ggml_mul_mat(ctx.get(), w, unaligned)) && ok;
-        ggml_tensor * precision = ggml_mul_mat(ctx.get(), w, x);
-        ok = ggml_backend_supports_op(ane, precision) == (n != 1) && ok;
-        ggml_prec_set_acc(precision, GGML_PREC_F32);
-        ok = !ggml_backend_supports_op(ane, precision) && ok;
-        ggml_prec_set_acc(precision, GGML_PREC_F16);
-        ggml_prec_set_src(precision, GGML_PREC_F32, 1);
-        ok = !ggml_backend_supports_op(ane, precision) && ok;
-        ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 128, false);
-        ggml_backend_sched_t sched = ggml_backend_sched_new(backends, nullptr, 3, 128, false, true);
-        ggml_tensor * cur = x;
-        std::vector<ggml_tensor *> matmuls;
-        for (int i = 0; i < 10; ++i) {
-            cur = ggml_scale(ctx.get(), cur, 0.5f);
-            ggml_backend_sched_set_tensor_backend(sched, cur, metal.get());
-            cur = ggml_mul_mat(ctx.get(), w, cur);
-            matmuls.push_back(cur);
-        }
-        cur = ggml_scale(ctx.get(), cur, 2.0f);
-        ggml_backend_sched_set_tensor_backend(sched, cur, metal.get());
-        ggml_set_output(cur);
-        ggml_build_forward_expand(graph, cur);
-        ok = ggml_backend_sched_alloc_graph(sched, graph) && ok;
-        for (ggml_tensor * mm : matmuls) {
-            ok = ggml_backend_sched_get_tensor_backend(sched, mm) == (n == 1 ? metal.get() : ane) && ok;
-            if (n != 1) {
-                ok = ggml_backend_buffer_get_type(mm->buffer) == buft && ok;
-                ok = ggml_backend_buffer_get_type(mm->src[1]->buffer) == buft && ok;
+    for (ggml_type type : { GGML_TYPE_F16, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0 }) {
+        const int k = ggml_is_quantized(type) ? 256 : 64;
+        for (int n : { 32, 64, 1 }) {
+            ggml_init_params params = { 1024*1024, nullptr, true };
+            ggml_context_ptr leaves(ggml_init(params));
+            ggml_new_tensor_1d(leaves.get(), GGML_TYPE_I8, 64);
+            ggml_tensor * w = ggml_new_tensor_2d(leaves.get(), type, k, k);
+            ggml_tensor * w2 = ggml_new_tensor_2d(leaves.get(), type, k, k);
+            ggml_tensor * x = ggml_new_tensor_2d(leaves.get(), GGML_TYPE_F32, k, n);
+            ggml_backend_buffer_ptr storage(ggml_backend_alloc_ctx_tensors_from_buft(leaves.get(), buft));
+            if (!storage) {
+                return false;
             }
-        }
-        std::vector<float> input(64*n), output(64*n);
-        for (int step = 0; step < 6 && ok; ++step) {
-            for (size_t i = 0; i < input.size(); ++i) {
-                input[i] = (int(i%31)-15)*0.25f + step*0.125f;
-                // Exercise per-token scales outside F16 range and all-zero tokens.
-                input[i] = i/64%4 == 3 ? 0.0f : std::ldexp(input[i], (int(i/64%3)-1)*20);
+            ggml_backend_buffer_set_usage(storage.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            std::vector<float> identity(k*k, 0.0f);
+            for (int i = 0; i < k; ++i) {
+                identity[i*k+i] = 2.0f;
             }
-            ggml_backend_tensor_set(x, input.data(), 0, ggml_nbytes(x));
-            ok = ggml_backend_sched_graph_compute(sched, graph) == GGML_STATUS_SUCCESS && ok;
-            ggml_backend_tensor_get(cur, output.data(), 0, ggml_nbytes(cur));
-            for (size_t i = 0; i < input.size(); ++i) {
-                if (output[i] != 2*input[i]) {
-                    fprintf(stderr, "ANE/Metal chain: n=%d step=%d element=%zu got=%g expected=%g\n", n, step, i, output[i], 2*input[i]);
-                    ok = false;
-                    break;
+            std::vector<uint8_t> weights(ggml_nbytes(w));
+            ggml_quantize_chunk(type, identity.data(), weights.data(), 0, k, k, nullptr);
+            ggml_backend_tensor_set(w, weights.data(), 0, ggml_nbytes(w));
+            for (float & value : identity) {
+                value *= 0.5f;
+            }
+            ggml_quantize_chunk(type, identity.data(), weights.data(), 0, k, k, nullptr);
+            ggml_backend_tensor_set(w2, weights.data(), 0, ggml_nbytes(w2));
+            ggml_context_ptr ctx(ggml_init(params));
+            if (ggml_is_quantized(type)) {
+                ggml_context_ptr copy_ctx(ggml_init(params));
+                ggml_tensor * copy = ggml_cast(copy_ctx.get(), w2, GGML_TYPE_F16);
+                ggml_backend_buffer_ptr copy_buffer(ggml_backend_alloc_ctx_tensors_from_buft(copy_ctx.get(), buft));
+                if (!copy_buffer) {
+                    return false;
+                }
+                ggml_cgraph * copy_graph = ggml_new_graph_custom(copy_ctx.get(), 8, false);
+                ggml_build_forward_expand(copy_graph, copy);
+                ok = ggml_backend_graph_compute(metal.get(), copy_graph) == GGML_STATUS_SUCCESS && ok;
+                std::vector<ggml_fp16_t> converted(k*k);
+                std::vector<float> reference(k*k);
+                ggml_backend_tensor_get(copy, converted.data(), 0, ggml_nbytes(copy));
+                ggml_get_type_traits(type)->to_float(weights.data(), reference.data(), k*k);
+                for (size_t i = 0; i < reference.size(); ++i) {
+                    ok = ggml_fp16_to_fp32(converted[i]) == ggml_fp16_to_fp32(ggml_fp32_to_fp16(reference[i])) && ok;
                 }
             }
+            ggml_tensor * unaligned = ggml_view_2d(ctx.get(), w, k, 32, w->nb[1], ggml_row_size(type, k));
+            ok = !ggml_backend_supports_op(ane, ggml_mul_mat(ctx.get(), unaligned, x)) && ok;
+            ok = !ggml_backend_supports_op(ane, ggml_mul_mat(ctx.get(), w, unaligned)) && ok;
+            ggml_tensor * precision = ggml_mul_mat(ctx.get(), w, x);
+            const bool offload = ggml_backend_supports_op(ane, precision);
+            ok = (!offload || n != 1) && ok;
+            if (type == GGML_TYPE_F16) {
+                ok = offload == (n != 1) && ok;
+            }
+            ggml_prec_set_acc(precision, GGML_PREC_F32);
+            ok = !ggml_backend_supports_op(ane, precision) && ok;
+            ggml_prec_set_acc(precision, GGML_PREC_F16);
+            ggml_prec_set_src(precision, GGML_PREC_F32, 1);
+            ok = !ggml_backend_supports_op(ane, precision) && ok;
+            ggml_cgraph * graph = ggml_new_graph_custom(ctx.get(), 128, false);
+            ggml_backend_sched_t sched = ggml_backend_sched_new(backends, nullptr, 3, 128, false, true);
+            ggml_tensor * cur = x;
+            std::vector<ggml_tensor *> matmuls;
+            for (int i = 0; i < 10; ++i) {
+                cur = ggml_scale(ctx.get(), cur, i%2 ? 1.0f : 0.5f);
+                ggml_backend_sched_set_tensor_backend(sched, cur, metal.get());
+                cur = ggml_mul_mat(ctx.get(), i%2 ? w2 : w, cur);
+                matmuls.push_back(cur);
+            }
+            cur = ggml_scale(ctx.get(), cur, 2.0f);
+            ggml_backend_sched_set_tensor_backend(sched, cur, metal.get());
+            ggml_set_output(cur);
+            ggml_build_forward_expand(graph, cur);
+            ok = ggml_backend_sched_alloc_graph(sched, graph) && ok;
+            for (ggml_tensor * mm : matmuls) {
+                ok = ggml_backend_sched_get_tensor_backend(sched, mm) == (offload ? ane : metal.get()) && ok;
+                if (offload) {
+                    ok = ggml_backend_buffer_get_type(mm->buffer) == buft && ok;
+                    ok = ggml_backend_buffer_get_type(mm->src[1]->buffer) == buft && ok;
+                }
+            }
+            std::vector<float> input(k*n), output(k*n);
+            for (int step = 0; step < 6 && ok; ++step) {
+                for (size_t i = 0; i < input.size(); ++i) {
+                    input[i] = (int(i%31)-15)*0.25f + step*0.125f;
+                    // Exercise per-token scales outside F16 range and all-zero tokens.
+                    input[i] = i/k%4 == 3 ? 0.0f : std::ldexp(input[i], offload ? (int(i/k%3)-1)*20 : 0);
+                }
+                ggml_backend_tensor_set(x, input.data(), 0, ggml_nbytes(x));
+                ok = ggml_backend_sched_graph_compute(sched, graph) == GGML_STATUS_SUCCESS && ok;
+                ggml_backend_tensor_get(cur, output.data(), 0, ggml_nbytes(cur));
+                for (size_t i = 0; i < input.size(); ++i) {
+                    if (!std::isfinite(output[i]) || std::abs(output[i] - 2*input[i]) > (type == GGML_TYPE_F16 ? 0.0f : std::abs(input[i])*0.01f)) {
+                        fprintf(stderr, "ANE/Metal chain: n=%d step=%d element=%zu got=%g expected=%g\n", n, step, i, output[i], 2*input[i]);
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            printf("  ANE/Metal shared-buffer chain type=%s n=%d, splits=%d: %s\n", ggml_type_name(type), n, ggml_backend_sched_get_n_splits(sched), ok ? "OK" : "FAIL");
+            ggml_backend_sched_free(sched);
         }
-        printf("  ANE/Metal shared-buffer chain n=%d, splits=%d: %s\n", n, ggml_backend_sched_get_n_splits(sched), ok ? "OK" : "FAIL");
-        ggml_backend_sched_free(sched);
     }
     for (ggml_backend_t producer : { ane, metal.get() }) {
         ggml_backend_event_t event = ggml_backend_event_new(ggml_backend_get_device(producer));
