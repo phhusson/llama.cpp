@@ -45,6 +45,27 @@
 #include <vector>
 #include <unordered_map>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
+static bool perf_measure_checkpoint(char marker) {
+    const char * value = getenv("GGML_TEST_PERF_FD");
+    if (!value) {
+        return true;
+    }
+#ifndef _WIN32
+    // Let an external meter sample before the benchmark continues.
+    const int fd = atoi(value);
+    char ack = 0;
+    if (write(fd, &marker, 1) == 1 && read(fd, &ack, 1) == 1 && ack == marker) {
+        return true;
+    }
+#endif
+    fprintf(stderr, "perf measurement handshake failed\n");
+    return false;
+}
+
 #ifdef __EMSCRIPTEN__
 #   define N_THREADS 1
 #else
@@ -1685,6 +1706,9 @@ struct test_case {
         int64_t total_time_us = 0;
         int64_t total_mem = 0;
         int total_runs = 0;
+        if (!perf_measure_checkpoint('B')) {
+            return false;
+        }
         do {
             int64_t start_time = ggml_time_us();
             ggml_status status = ggml_backend_graph_compute(backend, gf);
@@ -1701,6 +1725,9 @@ struct test_case {
             // re-draw any data-dependent inputs (expert ids) outside the timed region
             reinit_perf_iter(ctx.get());
         } while (total_time_us < 1000*1000); // run for at least 1 second
+        if (!perf_measure_checkpoint('E')) {
+            return false;
+        }
 
         // Create test result
         double avg_time_us      = (double) total_time_us / total_runs;
