@@ -1,3 +1,36 @@
+# Phh's NPU llama.cpp
+
+This fork of llama.cpp focus on exploiting NPUs on various hardware.
+It also supports prompt processing on ROCm and token generation on Vulkan.
+
+Benchs:
+- Qwen 3.5 9B On Apple Mac Mini M4 16GB, pp4096 202tok/s; 2612J => 258tok/s; 1043J [1]
+- Qwen 3.8 27B on Ryzen 8845HS, GPU pp4096 87.9 tok/s => 110 tok/s [2]
+
+[1] bartowski MiMo-V2.6-Distill-Qwen-9B-Q4_K_M; Joules are only to be taken relative to each other. The absolute value is meaningless as it includes warmup, and loops to test variance
+[2] Qwen3.8-27B-GSQ-RCO-IQ3_S, ROCm pp, Vulkan tg
+
+## Usage
+
+### Mac
+
+NPU is only used as bf16 matmul, MTL is used to convert weights just before ANE use them.
+
+GPU vs NPU+GPU bench:
+./build/bin/llama-bench -m ~/ML/models/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf -dev MTL0,ANE/MTL0 -sm layer -ts 1/0 -ngl 99 --n-prompt 4096 --n-gen 32
+
+NPU+GPU server:
+./build/bin/llama-server -m ~/ML/models/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf -dev ANE,MTL0 -sm layer -ts 1,0 -ngl 99 -lv 4 --host 0.0.0.0 --port 8000 -fa on -c 64000 # Yes we break fit
+
+Agent instructions for simple optimizations:
+- run scripts/ane-sweep.py and use its results to set GGML_ANE_MIN_MACS / GGML_ANE_MIN_INTENSITY
+- add missing quants for MTL OP_CPY to F16
+
+### ROCm + Vulkan
+
+Vulkan-only vs ROCm+vulkan bench:
+GGML_SPLIT_PPTG_DEVICES=ROCm0,Vulkan0 GGML_DMABUFT=1 GGML_DMABUF_HEAP=amdgpu GGML_DMABUF_AMDGPU_DEVICE=/dev/dri/renderD128 ./build/bin/llama-bench -m MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf --device ROCm0/Vulkan0 --n-prompt 4096 --n-gen 16 -ub 4096
+
 # llama.cpp
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
