@@ -14,6 +14,7 @@
 
 #include <array>
 #include <map>
+#include <string>
 #include <vector>
 
 struct llama_model;
@@ -281,6 +282,13 @@ private:
 
     // ggml_backend_sched realloc callback, counts and traces the graph reallocations of this context
     static void sched_graph_realloc(ggml_backend_sched_t sched, ggml_cgraph * gf, bool backend_ids_changed, bool graph_size_changed, void * user_data);
+
+    // pin the graph to a single compute device: the first for batched (pp) graphs, the last for token generation
+    void sched_update_preferred_backend(uint32_t n_tokens);
+    bool graph_pinned_backend = false;
+    // pp/tg device names for GGML_SPLIT_PPTG_DEVICES, empty when the feature is disabled
+    std::string split_pptg_pp;
+    std::string split_pptg_tg;
 
     // disable auto fused ops (Flash Attention, Gated Delta Net) whose op lands on a device
     // that differs from the layer it belongs to (usually due to missing backend support)
