@@ -12090,9 +12090,6 @@ static bool run_ane_metal_chain(ggml_backend_t ane, ggml_backend_t cpu, const ch
             ggml_tensor * precision = ggml_mul_mat(ctx.get(), w, x);
             const bool offload = ggml_backend_supports_op(ane, precision);
             ok = (!offload || n != 1) && ok;
-            if (type == GGML_TYPE_F16) {
-                ok = offload == (n != 1) && ok;
-            }
             ggml_prec_set_acc(precision, GGML_PREC_F32);
             ok = !ggml_backend_supports_op(ane, precision) && ok;
             ggml_prec_set_acc(precision, GGML_PREC_F16);
