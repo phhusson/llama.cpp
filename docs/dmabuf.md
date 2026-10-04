@@ -76,13 +76,15 @@ Shared allocations avoid copies but do not remove cross-backend synchronization 
 
 ### ROCm/Vulkan routing
 
-`GGML_ROCM_MIN_N=8` makes ROCm reject compute operations whose estimated batch size is below 8. The scheduler can then select Vulkan when it supports the operation and its buffers. The estimate follows activation inputs through reshapes and elementwise operations so attention heads are not counted as tokens. GET_ROWS remains excluded from this ROCm offload policy; views and other metadata operations remain supported. The threshold is disabled by default and read once per process.
+`GGML_SPLIT_PPTG_DEVICES=<pp_dev>,<tg_dev>` pins prompt-processing graphs to `pp_dev` and token-generation graphs to `tg_dev`. All operations that the pinned device supports, and whose buffers it can use, are placed on it, so each phase runs on a single device without cross-backend handoffs. The devices must be in the list given to `--device`. The option is disabled by default and read once per process; without it, placement follows the normal `--device` ordering and weight priority.
+
+This is intended for asymmetric devices where a prompt phase is compute bound and a generation phase is memory bound, for example a discrete-like split. It changes placement only; both devices must still be able to use the selected buffer type.
 
 For example, on an AMD UMA GPU:
 
 ```sh
 GGML_DMABUF_HEAP=amdgpu GGML_DMABUF_AMDGPU_DEVICE=/dev/dri/renderD128 \
-GGML_DMABUFT=1 GGML_ROCM_MIN_N=8 \
+GGML_DMABUFT=1 GGML_SPLIT_PPTG_DEVICES=ROCm0,Vulkan0 \
     llama-bench -m model.gguf --device ROCm0/Vulkan0 -ts 1/0 \
     -ub 4096 -p 8192 -n 8 -pg 8192,8 -fa on \
     -ot 'blk\..*=DMA_BUF' --lazy-mode on
@@ -90,7 +92,7 @@ GGML_DMABUFT=1 GGML_ROCM_MIN_N=8 \
 
 Use `-fa on` when both backends support Flash Attention: the automatic probe can disable it because the selected backend differs from the layer's original device. `-pg` exercises the prompt-to-generation state handoff, while `-p` and `-n` benchmark the phases separately.
 
-This is an operation-level placement heuristic, not a strict phase switch. Small prompt operations can run on Vulkan or CPU, and other model architectures can need different batch-size estimates. Use `GGML_SCHED_DEBUG=2` with `llama-bench -v` to inspect placement.
+Use `GGML_SCHED_DEBUG=2` with `llama-bench -v` to inspect placement.
 
 ### `-ot` bypasses the load-time support check
 
