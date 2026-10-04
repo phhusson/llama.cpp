@@ -7,6 +7,7 @@
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <unistd.h>
 
@@ -416,6 +417,34 @@ static bool ane_metal_quant(enum ggml_type type) {
     return enabled[type];
 }
 
+static double ane_env_double(const char * name, double fallback) {
+    const char * value = getenv(name);
+    if (!value) {
+        return fallback;
+    }
+    char * end;
+    double result = strtod(value, &end);
+    if (end == value || *end || !isfinite(result) || result < 0) {
+        GGML_ABORT("ANE: %s must be a finite nonnegative number", name);
+    }
+    return result;
+}
+
+static bool ane_worth_offloading(const struct ggml_tensor * op) {
+    static double min_macs, min_intensity;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        min_macs = ane_env_double("GGML_ANE_MIN_MACS", 6e9);
+        min_intensity = ane_env_double("GGML_ANE_MIN_INTENSITY", 45);
+    });
+    const struct ggml_tensor * w = op->src[0], * a = op->src[1];
+    const double k = w->ne[0], m = w->ne[1], n = a->ne[1];
+    const double macs = m*n*k;
+    // Estimate external traffic, including conversion writes and reads.
+    const double bytes = ggml_nbytes(w) + (ggml_is_quantized(w->type) ? 4*m*k : 0) + ggml_nbytes(a) + 4*n*k + 8*n*m + 8*n;
+    return macs >= min_macs && macs/bytes >= min_intensity;
+}
+
 static bool ane_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
     GGML_UNUSED(dev);
     if (op->op == GGML_OP_NONE || (op->op == GGML_OP_VIEW || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_TRANSPOSE || op->op == GGML_OP_PERMUTE)) {
@@ -439,7 +468,7 @@ static bool ane_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * o
         w->ne[0] % 32 == 0 && w->ne[1] % 32 == 0 && a->ne[1] % 32 == 0 &&
         w->ne[0] <= 16384 && w->ne[1] <= 16384 && a->ne[1] <= 4096 &&
         w->ne[2] == 1 && w->ne[3] == 1 && a->ne[2] == 1 && a->ne[3] == 1 &&
-        ggml_is_contiguous(w) && ggml_is_contiguous(a) && ggml_is_contiguous(op);
+        ggml_is_contiguous(w) && ggml_is_contiguous(a) && ggml_is_contiguous(op) && ane_worth_offloading(op);
 }
 
 static void ane_encode_convert(struct ane_context * ctx, id<MTLCommandBuffer> cb, const struct ggml_tensor * tensor, id<MTLBuffer> scratch, id<MTLBuffer> scales, bool output) {
