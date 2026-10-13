@@ -236,6 +236,7 @@ option(GGML_WEBGPU_JSPI                     "ggml: use JSPI for WebGPU"         
 option(GGML_ZDNN                            "ggml: use zDNN"                                  OFF)
 option(GGML_ANE                             "ggml: use Apple Neural Engine (private API)"       OFF)
 option(GGML_DMABUF                          "ggml: use dma-buf shared memory buffer type (Linux)" OFF)
+option(GGML_ROCKET                          "ggml: use the RK3588 NPU backend (Linux)" OFF)
 option(GGML_FAKENPU                         "ggml: use the fake NPU test backend"    OFF)
 option(GGML_VIRTGPU                         "ggml: use the VirtGPU/Virglrenderer API Remoting frontend"     OFF)
 option(GGML_VIRTGPU_BACKEND                 "ggml: build the VirtGPU/Virglrenderer API Remoting backend"    OFF)
