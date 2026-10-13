@@ -7,6 +7,8 @@
 #include <mutex>
 #include <vector>
 
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -51,6 +53,13 @@ struct ggml_backend_dmabuf_buffer_context {
     void * ptr;
 };
 
+// bracket CPU access of the dma-buf so the caches stay coherent with other devices
+static void ggml_backend_dmabuf_buffer_sync(ggml_backend_buffer_t buffer, bool start) {
+    ggml_backend_dmabuf_buffer_context * ctx = (ggml_backend_dmabuf_buffer_context *) buffer->context;
+    struct dma_buf_sync sync = { (uint64_t) ((start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END) | DMA_BUF_SYNC_RW) };
+    ioctl(ctx->fd, DMA_BUF_IOCTL_SYNC, &sync);
+}
+
 static void ggml_backend_dmabuf_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     ggml_backend_dmabuf_buffer_context * ctx = (ggml_backend_dmabuf_buffer_context *) buffer->context;
     for (const auto & entry : ggml_backend_dmabuf_importers_snapshot()) {
@@ -67,26 +76,28 @@ static void * ggml_backend_dmabuf_buffer_get_base(ggml_backend_buffer_t buffer) 
 }
 
 static void ggml_backend_dmabuf_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
+    ggml_backend_dmabuf_buffer_sync(buffer, true);
     memset((char *) tensor->data + offset, value, size);
-
-    GGML_UNUSED(buffer);
+    ggml_backend_dmabuf_buffer_sync(buffer, false);
 }
 
 static void ggml_backend_dmabuf_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    ggml_backend_dmabuf_buffer_sync(buffer, true);
     memcpy((char *) tensor->data + offset, data, size);
-
-    GGML_UNUSED(buffer);
+    ggml_backend_dmabuf_buffer_sync(buffer, false);
 }
 
 static void ggml_backend_dmabuf_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    ggml_backend_dmabuf_buffer_sync(buffer, true);
     memcpy(data, (const char *) tensor->data + offset, size);
-
-    GGML_UNUSED(buffer);
+    ggml_backend_dmabuf_buffer_sync(buffer, false);
 }
 
 static void ggml_backend_dmabuf_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_dmabuf_buffer_context * ctx = (ggml_backend_dmabuf_buffer_context *) buffer->context;
+    ggml_backend_dmabuf_buffer_sync(buffer, true);
     memset(ctx->ptr, value, buffer->size);
+    ggml_backend_dmabuf_buffer_sync(buffer, false);
 }
 
 static const struct ggml_backend_buffer_i ggml_backend_dmabuf_buffer_i = {
