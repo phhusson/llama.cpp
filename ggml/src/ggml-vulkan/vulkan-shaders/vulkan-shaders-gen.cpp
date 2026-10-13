@@ -890,7 +890,16 @@ void process_shaders() {
 
     for (std::string t : {"q1_0", "q2_0", "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "iq4_nl"}) {
         string_to_spv("cpy_f32_" + t, "copy_to_quant.comp", {{"DATA_A_" + to_uppercase(t), "1"}, {"S_TYPE", "float"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}});
-        string_to_spv("cpy_" + t + "_f32", "copy_from_quant.comp", {{"DATA_A_" + to_uppercase(t), "1"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}});
+    }
+
+    for (const auto& tname : type_names) {
+        if (tname == "f32" || tname == "f16" || tname == "bf16") {
+            continue;
+        }
+        std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+        string_to_spv("cpy_" + tname + "_f32",  "copy_from_quant.comp", {{data_a_key, "1"}, {"D_TYPE", "float"},     {"FLOAT_TYPE", "float"}});
+        string_to_spv("cpy_" + tname + "_f16",  "copy_from_quant.comp", {{data_a_key, "1"}, {"D_TYPE", "float16_t"}, {"FLOAT_TYPE", "float"}});
+        string_to_spv("cpy_" + tname + "_bf16", "copy_from_quant.comp", {{data_a_key, "1"}, {"D_TYPE", "uint16_t"},  {"FLOAT_TYPE", "float"}, {"DATA_D_BF16", "1"}});
     }
 
     for (auto src : {std::pair{"f32", "float"}, std::pair{"f16", "float16_t"}}) {

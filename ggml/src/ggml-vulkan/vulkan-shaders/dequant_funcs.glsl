@@ -755,3 +755,13 @@ vec2 get_dm(uint ib, uint a_offset) {
     return vec2(1, 0);
 }
 #endif
+
+// K-quants and ternary quants only define the 2-wide dequantize above; build
+// the 4-wide variant from it for shaders that unpack 4 elements per iteration.
+#if defined(DATA_A_Q2_K) || defined(DATA_A_Q3_K) || defined(DATA_A_Q4_K) || defined(DATA_A_Q5_K) || defined(DATA_A_Q6_K) || defined(DATA_A_TQ1_0) || defined(DATA_A_TQ2_0)
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    const vec2 v0 = dequantize(ib, iqs, a_offset);
+    const vec2 v1 = dequantize(ib, iqs + 2, a_offset);
+    return vec4(v0.x, v0.y, v1.x, v1.y);
+}
+#endif

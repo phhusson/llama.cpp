@@ -3342,14 +3342,38 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 #undef SET_ROWS
 
 
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q1_0], "cpy_q1_0_f32", cpy_q1_0_f32_len, cpy_q1_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q1_0), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q2_0], "cpy_q2_0_f32", cpy_q2_0_f32_len, cpy_q2_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q2_0), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q4_0], "cpy_q4_0_f32", cpy_q4_0_f32_len, cpy_q4_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q4_0), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q4_1], "cpy_q4_1_f32", cpy_q4_1_f32_len, cpy_q4_1_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q4_1), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q5_0], "cpy_q5_0_f32", cpy_q5_0_f32_len, cpy_q5_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q5_0), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q5_1], "cpy_q5_1_f32", cpy_q5_1_f32_len, cpy_q5_1_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q5_1), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q8_0], "cpy_q8_0_f32", cpy_q8_0_f32_len, cpy_q8_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q8_0), 1, 1}, {}, 1);
-    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_IQ4_NL], "cpy_iq4_nl_f32", cpy_iq4_nl_f32_len, cpy_iq4_nl_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_IQ4_NL), 1, 1}, {}, 1);
+#define CPY_QUANT(type, name) \
+    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32 [type], "cpy_" #name "_f32",  cpy_ ## name ## _f32_len,  cpy_ ## name ## _f32_data,  "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(type), 1, 1}, {}, 1); \
+    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f16 [type], "cpy_" #name "_f16",  cpy_ ## name ## _f16_len,  cpy_ ## name ## _f16_data,  "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(type), 1, 1}, {}, 1); \
+    ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_bf16[type], "cpy_" #name "_bf16", cpy_ ## name ## _bf16_len, cpy_ ## name ## _bf16_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(type), 1, 1}, {}, 1);
+
+    CPY_QUANT(GGML_TYPE_Q1_0,    q1_0)
+    CPY_QUANT(GGML_TYPE_Q2_0,    q2_0)
+    CPY_QUANT(GGML_TYPE_Q4_0,    q4_0)
+    CPY_QUANT(GGML_TYPE_Q4_1,    q4_1)
+    CPY_QUANT(GGML_TYPE_Q5_0,    q5_0)
+    CPY_QUANT(GGML_TYPE_Q5_1,    q5_1)
+    CPY_QUANT(GGML_TYPE_Q8_0,    q8_0)
+    CPY_QUANT(GGML_TYPE_Q2_K,    q2_k)
+    CPY_QUANT(GGML_TYPE_Q3_K,    q3_k)
+    CPY_QUANT(GGML_TYPE_Q4_K,    q4_k)
+    CPY_QUANT(GGML_TYPE_Q5_K,    q5_k)
+    CPY_QUANT(GGML_TYPE_Q6_K,    q6_k)
+    CPY_QUANT(GGML_TYPE_IQ1_S,   iq1_s)
+    CPY_QUANT(GGML_TYPE_IQ1_M,   iq1_m)
+    CPY_QUANT(GGML_TYPE_IQ2_XXS, iq2_xxs)
+    CPY_QUANT(GGML_TYPE_IQ2_XS,  iq2_xs)
+    CPY_QUANT(GGML_TYPE_IQ2_S,   iq2_s)
+    CPY_QUANT(GGML_TYPE_IQ3_XXS, iq3_xxs)
+    CPY_QUANT(GGML_TYPE_IQ3_S,   iq3_s)
+    CPY_QUANT(GGML_TYPE_IQ4_XS,  iq4_xs)
+    CPY_QUANT(GGML_TYPE_IQ4_NL,  iq4_nl)
+    CPY_QUANT(GGML_TYPE_MXFP4,   mxfp4)
+    CPY_QUANT(GGML_TYPE_NVFP4,   nvfp4)
+    CPY_QUANT(GGML_TYPE_TQ1_0,   tq1_0)
+    CPY_QUANT(GGML_TYPE_TQ2_0,   tq2_0)
+#undef CPY_QUANT
+
 
     auto get_suffix = [](bool src0_f16, bool src1_f16, bool dst_f16) {
         std::string s;
@@ -6257,20 +6281,38 @@ vk_pipeline ggml_vk_get_cpy_pipeline(ggml_backend_vk_context * ctx, const ggml_t
         }
     }
 
-    if (to == GGML_TYPE_F32) {
-        switch (src->type) {
-        case GGML_TYPE_Q1_0:
-        case GGML_TYPE_Q2_0:
-        case GGML_TYPE_Q4_0:
-        case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q5_0:
-        case GGML_TYPE_Q5_1:
-        case GGML_TYPE_Q8_0:
-        case GGML_TYPE_IQ4_NL:
-            return ctx->device->pipeline_cpy_quant_f32[src->type];
-        default:
-            break;
-        }
+    switch (src->type) {
+    case GGML_TYPE_Q1_0:
+    case GGML_TYPE_Q2_0:
+    case GGML_TYPE_Q4_0:
+    case GGML_TYPE_Q4_1:
+    case GGML_TYPE_Q5_0:
+    case GGML_TYPE_Q5_1:
+    case GGML_TYPE_Q8_0:
+    case GGML_TYPE_Q2_K:
+    case GGML_TYPE_Q3_K:
+    case GGML_TYPE_Q4_K:
+    case GGML_TYPE_Q5_K:
+    case GGML_TYPE_Q6_K:
+    case GGML_TYPE_IQ1_S:
+    case GGML_TYPE_IQ1_M:
+    case GGML_TYPE_IQ2_XXS:
+    case GGML_TYPE_IQ2_XS:
+    case GGML_TYPE_IQ2_S:
+    case GGML_TYPE_IQ3_XXS:
+    case GGML_TYPE_IQ3_S:
+    case GGML_TYPE_IQ4_XS:
+    case GGML_TYPE_IQ4_NL:
+    case GGML_TYPE_MXFP4:
+    case GGML_TYPE_NVFP4:
+    case GGML_TYPE_TQ1_0:
+    case GGML_TYPE_TQ2_0:
+        /**/ if (to == GGML_TYPE_F32)  return ctx->device->pipeline_cpy_quant_f32 [src->type];
+        else if (to == GGML_TYPE_F16)  return ctx->device->pipeline_cpy_quant_f16 [src->type];
+        else if (to == GGML_TYPE_BF16) return ctx->device->pipeline_cpy_quant_bf16[src->type];
+        break;
+    default:
+        break;
     }
 
     if (src->type == to) {
@@ -15921,7 +15963,56 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                     case GGML_TYPE_Q5_0:
                     case GGML_TYPE_Q5_1:
                     case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_Q2_K:
+                    case GGML_TYPE_Q3_K:
+                    case GGML_TYPE_Q4_K:
+                    case GGML_TYPE_Q5_K:
+                    case GGML_TYPE_Q6_K:
+                    case GGML_TYPE_IQ1_S:
+                    case GGML_TYPE_IQ1_M:
+                    case GGML_TYPE_IQ2_XXS:
+                    case GGML_TYPE_IQ2_XS:
+                    case GGML_TYPE_IQ2_S:
+                    case GGML_TYPE_IQ3_XXS:
+                    case GGML_TYPE_IQ3_S:
+                    case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_IQ4_NL:
+                    case GGML_TYPE_MXFP4:
+                    case GGML_TYPE_NVFP4:
+                    case GGML_TYPE_TQ1_0:
+                    case GGML_TYPE_TQ2_0:
+                        return true;
+                    default:
+                        break;
+                    }
+                }
+                if (src1_type == GGML_TYPE_F16 || src1_type == GGML_TYPE_BF16) {
+                    switch (src0_type) {
+                    case GGML_TYPE_Q1_0:
+                    case GGML_TYPE_Q2_0:
+                    case GGML_TYPE_Q4_0:
+                    case GGML_TYPE_Q4_1:
+                    case GGML_TYPE_Q5_0:
+                    case GGML_TYPE_Q5_1:
+                    case GGML_TYPE_Q8_0:
+                    case GGML_TYPE_Q2_K:
+                    case GGML_TYPE_Q3_K:
+                    case GGML_TYPE_Q4_K:
+                    case GGML_TYPE_Q5_K:
+                    case GGML_TYPE_Q6_K:
+                    case GGML_TYPE_IQ1_S:
+                    case GGML_TYPE_IQ1_M:
+                    case GGML_TYPE_IQ2_XXS:
+                    case GGML_TYPE_IQ2_XS:
+                    case GGML_TYPE_IQ2_S:
+                    case GGML_TYPE_IQ3_XXS:
+                    case GGML_TYPE_IQ3_S:
+                    case GGML_TYPE_IQ4_XS:
+                    case GGML_TYPE_IQ4_NL:
+                    case GGML_TYPE_MXFP4:
+                    case GGML_TYPE_NVFP4:
+                    case GGML_TYPE_TQ1_0:
+                    case GGML_TYPE_TQ2_0:
                         return true;
                     default:
                         break;
