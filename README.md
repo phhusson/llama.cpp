@@ -1,14 +1,19 @@
 # Phh's NPU llama.cpp
 
-This fork of llama.cpp focus on exploiting NPUs on various hardware.
-It also supports prompt processing on ROCm and token generation on Vulkan.
+This fork of llama.cpp explores the fun things we can do when sharing buffers and events/fences across devices or backends.
+Major interest are NPUs, but, there is also:
+1. One GPU multiple API: ROCm pp, Vulkan tg
+2. Foreign GPUs interop (one nVidia and one AMD GPU): async Vulkan split (usable tensor-split on Vulkan!)
+3. Async low-latency Thunderbolt connectivity
 
 Benchs:
 - Qwen 3.5 9B On Apple Mac Mini M4 16GB, pp4096 202tok/s; 2612J => 258tok/s; 1043J [1]
 - Qwen 3.8 27B on Ryzen 8845HS, GPU pp4096 87.9 tok/s => 110 tok/s [2]
+- Qwen 3.7 27b on {Radeon RX 6700 XT 12GB + RTX 3070 8GB} tg 19.58tok/s => 27.33tok/s
 
 [1] bartowski MiMo-V2.6-Distill-Qwen-9B-Q4_K_M; Joules are only to be taken relative to each other. The absolute value is meaningless as it includes warmup, and loops to test variance
 [2] Qwen3.8-27B-GSQ-RCO-IQ3_S, ROCm pp, Vulkan tg
+[3] See Vulkan async split section
 
 ## Usage
 
@@ -30,6 +35,50 @@ Agent instructions for simple optimizations:
 
 Vulkan-only vs ROCm+vulkan bench:
 GGML_SPLIT_PPTG_DEVICES=ROCm0,Vulkan0 GGML_DMABUFT=1 GGML_DMABUF_HEAP=amdgpu GGML_DMABUF_AMDGPU_DEVICE=/dev/dri/renderD128 ./build/bin/llama-bench -m MiMo-V2.6-Distill-Qwen-9B-Q8_0.gguf --device ROCm0/Vulkan0 --n-prompt 4096 --n-gen 16 -ub 4096
+
+### Vulkan async split
+
+Mainline llama.cpp (sync splits):
+```
+./build/bin/llama-bench -m ../Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf\?download=true -dev Vulkan1/Vulkan0 -ts 1/1 --split-mode tensor --n-prompt 2048 -ub 512 --n-gen 16      phh@phh-abiko
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon RX 6700 XT (RADV NAVI22) (radv) | uma: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = NVIDIA GeForce RTX 3070 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2v
+| model                          |       size |     params | backend    | ngl |     sm | dev          | ts           |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | ------------ | ------------ | --------------: | -------------------: |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | tensor | Vulkan1/Vulkan0 | 1.00/1.00    |          pp2048 |        293.54 ± 7.09 |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | tensor | Vulkan1/Vulkan0 | 1.00/1.00    |            tg16 |         13.06 ± 0.16 |
+
+./build/bin/llama-bench -m ../Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf\?download=true -dev Vulkan1/Vulkan0 -ts 1/1 --split-mode layer --n-prompt 2048 -ub 512 --n-gen 16       phh@phh-abiko
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon RX 6700 XT (RADV NAVI22) (radv) | uma: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = NVIDIA GeForce RTX 3070 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2v
+| model                          |       size |     params | backend    | ngl | dev          | ts           |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------------ | ------------ | --------------: | -------------------: |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | Vulkan1/Vulkan0 | 1.00/1.00    |          pp2048 |       450.09 ± 12.76 |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | Vulkan1/Vulkan0 | 1.00/1.00    |            tg16 |         19.58 ± 0.47 |
+```
+
+This tree (async splits):
+```
+$ llama-bench -m Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf -dev Vulkan1/Vulkan0 -ts 1/1 --split-mode tensor --n-prompt 2048 -ub 512 --n-gen 16
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon RX 6700 XT (RADV NAVI22) (radv) | uma: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = NVIDIA GeForce RTX 3070 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2v
+| model                          |       size |     params | backend    | ngl |     sm | dev          | ts           |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | -----: | ------------ | ------------ | --------------: | -------------------: |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | tensor | Vulkan1/Vulkan0 | 1.00/1.00    |          pp2048 |        356.27 ± 1.07 |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | tensor | Vulkan1/Vulkan0 | 1.00/1.00    |            tg16 |         27.33 ± 1.30 |
+
+$ llama-bench -m ../Qwen3.8-27B-GSQ-RCO-IQ3_XXS.gguf -dev Vulkan1/Vulkan0 -ts 1/1 --split-mode layer --n-prompt 2048 -ub 512 --n-gen 16
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon RX 6700 XT (RADV NAVI22) (radv) | uma: 0 | fp16: dot2 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 1 = NVIDIA GeForce RTX 3070 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2v
+| model                          |       size |     params | backend    | ngl | dev          | ts           |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------------ | ------------ | --------------: | -------------------: |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | Vulkan1/Vulkan0 | 1.00/1.00    |          pp2048 |       454.22 ± 13.78 |
+| qwen35 27B IQ3_S - 3.4375 bpw  |   9.39 GiB |    26.90 B | Vulkan     |  -1 | Vulkan1/Vulkan0 | 1.00/1.00    |            tg16 |         21.26 ± 1.35 |
+```
 
 # llama.cpp
 
