@@ -48,6 +48,7 @@ template [[host_name("kernel_cpy_f32_bf16")]]  kernel kernel_cpy_t kernel_cpy_t_
 template [[host_name("kernel_cpy_f16_f32")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    float>;
 template [[host_name("kernel_cpy_f16_f16")]]   kernel kernel_cpy_t kernel_cpy_t_t<half,    half>;
 #if defined(GGML_METAL_HAS_BF16)
+template [[host_name("kernel_cpy_bf16_f16")]]  kernel kernel_cpy_t kernel_cpy_t_t<bfloat,  half>;
 template [[host_name("kernel_cpy_bf16_f32")]]  kernel kernel_cpy_t kernel_cpy_t_t<bfloat,  float>;
 template [[host_name("kernel_cpy_bf16_bf16")]] kernel kernel_cpy_t kernel_cpy_t_t<bfloat,  bfloat>;
 #endif
@@ -148,6 +149,7 @@ template [[host_name("kernel_cpy_q5_1_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<
 template [[host_name("kernel_cpy_q8_0_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_q8_0, 2, dequantize_q8_0>;
 
 template [[host_name("kernel_cpy_q4_K_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_q4_K, QK_NL, dequantize_q4_K>;
+template [[host_name("kernel_cpy_q5_K_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_q5_K, QK_NL, dequantize_q5_K>;
 template [[host_name("kernel_cpy_q6_K_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_q6_K, QK_NL, dequantize_q6_K>;
 
 template [[host_name("kernel_cpy_tq2_0_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_tq2_0, QK_NL, dequantize_tq2_0>;
@@ -161,6 +163,7 @@ template [[host_name("kernel_cpy_q5_1_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<
 template [[host_name("kernel_cpy_q8_0_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_q8_0, 2, dequantize_q8_0>;
 
 template [[host_name("kernel_cpy_q4_K_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_q4_K, QK_NL, dequantize_q4_K>;
+template [[host_name("kernel_cpy_q5_K_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_q5_K, QK_NL, dequantize_q5_K>;
 template [[host_name("kernel_cpy_q6_K_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_q6_K, QK_NL, dequantize_q6_K>;
 
 template [[host_name("kernel_cpy_tq2_0_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_tq2_0, QK_NL, dequantize_tq2_0>;
