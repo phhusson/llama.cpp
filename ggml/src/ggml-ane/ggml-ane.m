@@ -366,7 +366,12 @@ static void ane_free(ggml_backend_t backend) {
     free(backend);
 }
 
-static bool ane_metal_quant(enum ggml_type type) {
+// weight types that Metal can convert to F16 for the ANE
+static bool ane_metal_candidate(enum ggml_type type) {
+    return ggml_is_quantized(type) || type == GGML_TYPE_BF16;
+}
+
+static bool ane_metal_to_f16(enum ggml_type type) {
     static bool enabled[GGML_TYPE_COUNT];
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -384,7 +389,7 @@ static bool ane_metal_quant(enum ggml_type type) {
                 bool found = false;
                 for (int i = 0; i < GGML_TYPE_COUNT; ++i) {
                     enum ggml_type candidate = (enum ggml_type) i;
-                    if (ggml_is_quantized(candidate) && [name caseInsensitiveCompare:[NSString stringWithUTF8String:ggml_type_name(candidate)]] == NSOrderedSame) {
+                    if (ane_metal_candidate(candidate) && [name caseInsensitiveCompare:[NSString stringWithUTF8String:ggml_type_name(candidate)]] == NSOrderedSame) {
                         enabled[candidate] = true;
                         found = true;
                         break;
@@ -396,7 +401,7 @@ static bool ane_metal_quant(enum ggml_type type) {
             }
             for (int i = 0; i < GGML_TYPE_COUNT; ++i) {
                 enum ggml_type candidate = (enum ggml_type) i;
-                if (!ggml_is_quantized(candidate) || (value && !enabled[candidate])) {
+                if (!ane_metal_candidate(candidate) || (value && !enabled[candidate])) {
                     continue;
                 }
                 struct ggml_init_params params = { .mem_size = 3*ggml_tensor_overhead(), .no_alloc = true };
@@ -441,7 +446,7 @@ static bool ane_worth_offloading(const struct ggml_tensor * op) {
     const double k = w->ne[0], m = w->ne[1], n = a->ne[1];
     const double macs = m*n*k;
     // Estimate external traffic, including conversion writes and reads.
-    const double bytes = ggml_nbytes(w) + (ggml_is_quantized(w->type) ? 4*m*k : 0) + ggml_nbytes(a) + 4*n*k + 8*n*m + 8*n;
+    const double bytes = ggml_nbytes(w) + (ane_metal_candidate(w->type) ? 4*m*k : 0) + ggml_nbytes(a) + 4*n*k + 8*n*m + 8*n;
     return macs >= min_macs && macs/bytes >= min_intensity;
 }
 
@@ -463,7 +468,7 @@ static bool ane_supports_op(ggml_backend_dev_t dev, const struct ggml_tensor * o
     if (w->view_offs % page || (a->type == GGML_TYPE_F16 && a->view_offs % page)) {
         return false;
     }
-    return (w->type == GGML_TYPE_F16 || ane_metal_quant(w->type)) && (a->type == GGML_TYPE_F32 || a->type == GGML_TYPE_F16) && op->type == GGML_TYPE_F32 &&
+    return (w->type == GGML_TYPE_F16 || ane_metal_to_f16(w->type)) && (a->type == GGML_TYPE_F32 || a->type == GGML_TYPE_F16) && op->type == GGML_TYPE_F32 &&
         w->ne[0] >= 32 && w->ne[1] >= 32 && a->ne[1] >= 32 &&
         w->ne[0] % 32 == 0 && w->ne[1] % 32 == 0 && a->ne[1] % 32 == 0 &&
         w->ne[0] <= 16384 && w->ne[1] <= 16384 && a->ne[1] <= 4096 &&
@@ -589,7 +594,7 @@ static enum ggml_status ane_graph_compute(ggml_backend_t backend, struct ggml_cg
             }
 
             struct ggml_tensor converted;
-            if (ggml_is_quantized(w->type)) {
+            if (ane_metal_candidate(w->type)) {
                 enum ggml_status status = ane_prepare_weights(backend, op->src[0], &converted);
                 if (status != GGML_STATUS_SUCCESS) {
                     return status;

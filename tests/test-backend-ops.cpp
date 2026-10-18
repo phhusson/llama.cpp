@@ -12760,7 +12760,7 @@ static bool run_ane_metal_chain(ggml_backend_t ane, ggml_backend_t cpu, const ch
         return false;
     }
     bool ok = true;
-    for (ggml_type type : { GGML_TYPE_F16, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0 }) {
+    for (ggml_type type : { GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0 }) {
         const int k = ggml_is_quantized(type) ? 256 : 64;
         for (int n : { 32, 64, 1 }) {
             ggml_init_params params = { 1024*1024, nullptr, true };
