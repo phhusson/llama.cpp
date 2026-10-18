@@ -13072,6 +13072,13 @@ void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
     ggml_vk_destroy_buffer(ctx->prealloc_add_rms_partials);
     ggml_vk_destroy_buffer(ctx->sync_staging);
 
+    ggml_vk_host_free(ctx->cross_device_staging);
+    ctx->cross_device_staging = nullptr;
+    for (void * staging : ctx->cross_device_staging_retired) {
+        ggml_vk_host_free(staging);
+    }
+    ctx->cross_device_staging_retired.clear();
+
     ctx->prealloc_y_last_pipeline_used = nullptr;
     ctx->prealloc_y_last_tensor_used = nullptr;
     ctx->prealloc_y_last_k_padded = false;
@@ -13495,6 +13502,134 @@ static void ggml_backend_vk_get_tensor_async(ggml_backend_t backend, const ggml_
     ggml_backend_vk_get_tensor_2d_async(backend, tensor, data, offset, size, 1, size, size);
 }
 
+// Get a region of pinned host memory that both devices can access. The region is
+// valid until the next synchronize of ctx, so in-flight copies may still read it.
+static bool ggml_vk_get_cross_device_staging(ggml_backend_vk_context * ctx, vk_device & src_device, vk_device & dst_device, size_t size,
+                                             vk_buffer & src_staging, size_t & src_staging_offset,
+                                             vk_buffer & dst_staging, size_t & dst_staging_offset) {
+    const size_t align = vk_instance.host_import_alignment != 0 ? vk_instance.host_import_alignment : 256;
+    const size_t region_size = (size + align - 1) / align * align;
+
+    if (ctx->cross_device_staging == nullptr || ctx->cross_device_staging_used + region_size > ctx->cross_device_staging_size) {
+        const size_t new_size = (std::max(region_size, ctx->cross_device_staging_size * 2) + align - 1) / align * align;
+        void * new_staging = ggml_vk_host_malloc(new_size);
+        if (new_staging == nullptr) {
+            return false;
+        }
+        if (ctx->cross_device_staging != nullptr) {
+            // the old allocation, and the device views into it, may still be used by in-flight copies
+            ctx->cross_device_staging_retired.push_back(ctx->cross_device_staging);
+        }
+        ctx->cross_device_staging = new_staging;
+        ctx->cross_device_staging_size = new_size;
+        ctx->cross_device_staging_used = 0;
+    }
+
+    void * region = (uint8_t *) ctx->cross_device_staging + ctx->cross_device_staging_used;
+    ctx->cross_device_staging_used += region_size;
+
+    ggml_vk_host_get(src_device, region, src_staging, src_staging_offset);
+    ggml_vk_host_get(dst_device, region, dst_staging, dst_staging_offset);
+
+    return src_staging != nullptr && dst_staging != nullptr;
+}
+
+// Copy between two Vulkan devices through pinned host memory. The producer copies
+// into shared staging and exports an external fence, which the consumer imports as a
+// wait semaphore. Returns false if any capability is missing, so the caller can fall
+// back to the synchronous path.
+static bool ggml_backend_vk_cpy_tensor_async_cross_device(ggml_backend_t backend_src, ggml_backend_t backend_dst,
+                                                          const ggml_tensor * src, ggml_tensor * dst,
+                                                          vk_buffer src_buf, vk_buffer dst_buf) {
+    if (getenv("GGML_VK_DISABLE_CROSS_DEVICE_ASYNC") != NULL || !ggml_backend_is_vk(backend_src)) {
+        return false;
+    }
+
+    vk_device src_device = src_buf->device;
+    vk_device dst_device = dst_buf->device;
+
+    // the producer must export a sync file and the consumer must import it
+    if (!vk_instance.multi_device ||
+        !src_device->external_memory_host || !dst_device->external_memory_host ||
+        !src_device->external_fence_fd || !dst_device->external_semaphore_fd) {
+        if (getenv("GGML_VK_DEBUG_CPY")) fprintf(stderr, "CPYDBG gate reject: multi=%d emh=%d/%d fence=%d sem=%d\n",
+            (int) vk_instance.multi_device, (int) src_device->external_memory_host, (int) dst_device->external_memory_host,
+            (int) src_device->external_fence_fd, (int) dst_device->external_semaphore_fd);
+        return false;
+    }
+
+    ggml_backend_vk_context * src_ctx = (ggml_backend_vk_context *) backend_src->context;
+    ggml_backend_vk_context * dst_ctx = (ggml_backend_vk_context *) backend_dst->context;
+
+    const size_t size = ggml_nbytes(src);
+
+    vk_buffer src_staging = nullptr;
+    vk_buffer dst_staging = nullptr;
+    size_t src_staging_offset = 0;
+    size_t dst_staging_offset = 0;
+    if (!ggml_vk_get_cross_device_staging(dst_ctx, src_device, dst_device, size,
+                                          src_staging, src_staging_offset, dst_staging, dst_staging_offset)) {
+        return false;
+    }
+
+    // producer: copy src into the shared staging buffer and export a fence for the copy
+    int fd = -1;
+    {
+        vk_context src_compute_ctx = ggml_vk_get_compute_ctx(src_ctx);
+
+        ggml_vk_buffer_copy_async(src_compute_ctx, src_staging, src_staging_offset, src_buf,
+                                  vk_tensor_offset(src) + src->view_offs, size);
+        ggml_vk_ctx_end(src_compute_ctx);
+
+        vk::Fence fence;
+        try {
+            vk::ExportFenceCreateInfo export_info;
+            export_info.handleTypes = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+            vk::FenceCreateInfo fence_info;
+            fence_info.pNext = &export_info;
+            fence = src_device->device.createFence(fence_info);
+        } catch (const vk::SystemError &) {
+            return false;
+        }
+
+        ggml_vk_submit(src_compute_ctx, fence);
+        src_ctx->submit_pending = true;
+        src_ctx->compute_ctx.reset();
+
+        try {
+            vk::FenceGetFdInfoKHR info;
+            info.fence = fence;
+            info.handleType = vk::ExternalFenceHandleTypeFlagBits::eSyncFd;
+            fd = src_device->device.getFenceFdKHR(info);
+        } catch (const vk::SystemError &) {
+            fd = -1;
+        }
+        src_device->device.destroyFence(fence);
+    }
+
+    if (fd < 0) {
+        return false;
+    }
+
+    // consumer: import the producer fence and wait on it in the next submission
+    ggml_backend_fence_t fence = ggml_backend_fence_init(fd);
+    if (fence == NULL || !ggml_backend_fence_wait(backend_dst, fence)) {
+        ggml_backend_fence_free(fence);
+        return false;
+    }
+    ggml_backend_fence_free(fence);
+
+    // consumer: copy the shared staging buffer into dst
+    vk_context dst_compute_ctx = ggml_vk_get_compute_ctx(dst_ctx);
+    ggml_vk_buffer_copy_async(dst_compute_ctx, dst_buf, vk_tensor_offset(dst) + dst->view_offs,
+                              dst_staging, dst_staging_offset, size);
+
+    if (getenv("GGML_VK_DEBUG_CPY")) fprintf(stderr, "CPYDBG async ok: %s -> %s nbytes=%zu\n",
+        src_device->name.c_str(), dst_device->name.c_str(), size);
+
+    return true;
+}
+
 static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst) {
     VK_LOG_DEBUG("ggml_backend_vk_cpy_tensor_async(" << src << " -> " << dst << ", size=" << ggml_nbytes(src) << ")");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend_dst->context;
@@ -13514,9 +13649,8 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
     if (ggml_backend_buffer_is_vk(src->buffer)) {
         ggml_backend_vk_buffer_context * src_buf_ctx = (ggml_backend_vk_buffer_context *)src->buffer->context;
 
-        // Async copy only works within the same device
         if (src_buf_ctx->dev_buffer->device != dst_buf->device) {
-            return false;
+            return ggml_backend_vk_cpy_tensor_async_cross_device(backend_src, backend_dst, src, dst, src_buf_ctx->dev_buffer, dst_buf);
         }
 
         vk_context compute_ctx = ggml_vk_get_compute_ctx(ctx);
@@ -13635,6 +13769,13 @@ void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
         }
         ctx->compute_ctx.reset();
     }
+
+    // the device has drained, so the shared cross-device staging buffer is free to reuse
+    ctx->cross_device_staging_used = 0;
+    for (void * staging : ctx->cross_device_staging_retired) {
+        ggml_vk_host_free(staging);
+    }
+    ctx->cross_device_staging_retired.clear();
 }
 
 static void ggml_backend_vk_synchronize(ggml_backend_t backend) {

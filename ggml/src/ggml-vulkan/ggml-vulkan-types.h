@@ -1279,6 +1279,14 @@ struct ggml_backend_vk_context {
     std::vector<vk::Semaphore> fence_pending_semaphores;
     std::vector<vk::Semaphore> fence_inflight_semaphores;
 
+    // pinned host memory shared between devices for cross-device copies. The graph
+    // bump-allocates regions and synchronize resets the bump pointer; allocations
+    // retired by growth are freed once the device has drained.
+    void * cross_device_staging {};
+    size_t cross_device_staging_size {};
+    size_t cross_device_staging_used {};
+    std::vector<void *> cross_device_staging_retired;
+
     std::vector<vk_context_ref> tensor_ctxs;
 
     std::vector<vk::DescriptorPool> descriptor_pools;
